@@ -1,15 +1,65 @@
 # Wind Data Processing Shiny App
-# Processes CSV files with wind speed, direction, and temperature data
+# Processes CSV/Excel/TXT files with wind speed, direction, and temperature data
 # Performs hourly averaging with vector averaging for wind direction
 
 library(shiny)
 library(dplyr)
 library(lubridate)
 library(DT)
+library(readxl)
 
 # ============================================================================
 # HELPER FUNCTIONS
 # ============================================================================
+
+#' Detect delimiter in a text file
+detect_delimiter <- function(file_path, n_lines = 10) {
+  # Read first few lines
+  lines <- readLines(file_path, n = n_lines, warn = FALSE)
+  if (length(lines) == 0) return(",")
+
+  # Common delimiters to check
+  delimiters <- c(",", "\t", ";", "|", " ")
+  delimiter_names <- c("comma", "tab", "semicolon", "pipe", "space")
+
+  # Count occurrences of each delimiter
+  counts <- sapply(delimiters, function(d) {
+    # Count in each line and check consistency
+    line_counts <- sapply(lines, function(l) length(gregexpr(d, l, fixed = TRUE)[[1]]))
+    # Filter out -1 (no match)
+    line_counts[line_counts < 0] <- 0
+    # Return median count (most consistent)
+    if (all(line_counts == 0)) return(0)
+    median(line_counts)
+  })
+
+  # Pick delimiter with highest consistent count
+  if (max(counts) == 0) return(",")  # default to comma
+  best_idx <- which.max(counts)
+  return(delimiters[best_idx])
+}
+
+#' Read data file (CSV, Excel, or delimited text)
+read_data_file <- function(file_path, file_ext) {
+  file_ext <- tolower(file_ext)
+
+  if (file_ext %in% c("xls", "xlsx")) {
+    # Read Excel file
+    data <- read_excel(file_path, na = c("", "NA", "N/A", "null", "-"))
+    data <- as.data.frame(data, stringsAsFactors = FALSE)
+  } else if (file_ext == "csv") {
+    # Read CSV file
+    data <- read.csv(file_path, stringsAsFactors = FALSE,
+                     check.names = FALSE, na.strings = c("", "NA", "N/A", "null", "-"))
+  } else {
+    # TXT or other - detect delimiter
+    delimiter <- detect_delimiter(file_path)
+    data <- read.delim(file_path, sep = delimiter, stringsAsFactors = FALSE,
+                       check.names = FALSE, na.strings = c("", "NA", "N/A", "null", "-"))
+  }
+
+  return(data)
+}
 
 #' Parse various date/time formats into POSIXct
 #' Handles: POSIX, mm-dd-YY, dd-mm-YYYY, ISO 8601, separate columns, etc.
@@ -336,13 +386,9 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
   # Round direction to nearest degree
   hourly_data$wind_dir_deg <- round(hourly_data$wind_dir_avg, 0)
 
-  # Create POSIX timestamp
-  hourly_data$posix_timestamp <- as.numeric(hourly_data$hour_group)
-
-  # Prepare output
+  # Prepare output (no POSIX timestamp, just formatted datetime)
   output <- data.frame(
-    POSIX_Timestamp = hourly_data$posix_timestamp,
-    DateTime = format(hourly_data$hour_group, "%Y-%m-%d %H:%M:%S"),
+    DateTime = format(hourly_data$hour_group, "%Y-%m-%d %H:%M"),
     Wind_Speed_mph = round(hourly_data$wind_speed_mph, 2),
     Wind_Direction_deg = hourly_data$wind_dir_deg,
     stringsAsFactors = FALSE
@@ -367,8 +413,11 @@ ui <- fluidPage(
       width = 4,
 
       # File upload
-      fileInput("file", "Upload CSV File",
-                accept = c(".csv", ".txt", "text/csv", "text/plain")),
+      fileInput("file", "Upload Data File",
+                accept = c(".csv", ".txt", ".xls", ".xlsx",
+                           "text/csv", "text/plain",
+                           "application/vnd.ms-excel",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
 
       hr(),
 
@@ -467,6 +516,13 @@ ui <- fluidPage(
         ),
 
         tabPanel("Help",
+                 h4("Supported File Formats"),
+                 tags$ul(
+                   tags$li("CSV - comma-separated values"),
+                   tags$li("TXT - auto-detects delimiter (comma, tab, semicolon, pipe, space)"),
+                   tags$li("XLS - Excel 97-2003 format"),
+                   tags$li("XLSX - Excel 2007+ format")
+                 ),
                  h4("Supported Date/Time Formats"),
                  tags$ul(
                    tags$li("POSIX timestamp (Unix epoch seconds)"),
@@ -500,8 +556,7 @@ ui <- fluidPage(
                  h4("Output"),
                  p("The processed data includes:"),
                  tags$ul(
-                   tags$li("POSIX timestamp (Unix epoch seconds)"),
-                   tags$li("Readable datetime (YYYY-MM-DD HH:MM:SS)"),
+                   tags$li("DateTime (YYYY-MM-DD HH:MM)"),
                    tags$li("Wind speed in mph"),
                    tags$li("Wind direction in degrees (0-360)"),
                    tags$li("Temperature in Fahrenheit (if provided)")
@@ -527,10 +582,12 @@ server <- function(input, output, session) {
   observeEvent(input$file, {
     req(input$file)
 
-    # Read the CSV file
+    # Get file extension
+    file_ext <- tools::file_ext(input$file$name)
+
+    # Read the file based on type
     tryCatch({
-      data <- read.csv(input$file$datapath, stringsAsFactors = FALSE,
-                       check.names = FALSE, na.strings = c("", "NA", "N/A", "null", "-"))
+      data <- read_data_file(input$file$datapath, file_ext)
       uploaded_data(data)
 
       col_names <- names(data)
