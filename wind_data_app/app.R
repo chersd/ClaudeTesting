@@ -110,6 +110,19 @@ parse_datetime_string <- function(datetime_str) {
   n <- length(datetime_str)
   result <- rep(as.POSIXct(NA), n)
 
+  # Detect and handle timezone abbreviations
+  # Daylight time zones need -1 hour adjustment to convert to standard time
+  daylight_tz_pattern <- "\\s+(PDT|EDT|CDT|MDT|ADT|AKDT)$"
+  standard_tz_pattern <- "\\s+(PST|EST|CST|MST|AST|AKST|HST|UTC|GMT)$"
+
+  # Track which entries need daylight adjustment
+  needs_dst_adjustment <- grepl(daylight_tz_pattern, datetime_str, ignore.case = TRUE)
+
+  # Remove timezone abbreviations from strings before parsing
+  datetime_str <- gsub(daylight_tz_pattern, "", datetime_str, ignore.case = TRUE)
+  datetime_str <- gsub(standard_tz_pattern, "", datetime_str, ignore.case = TRUE)
+  datetime_str <- trimws(datetime_str)
+
   # Try each format pattern
   formats_to_try <- list(
     # ISO 8601 formats
@@ -214,6 +227,12 @@ parse_datetime_string <- function(datetime_str) {
         }
       }
     }
+  }
+
+  # Apply daylight saving adjustment: subtract 1 hour for daylight time zones
+  # This converts daylight time to standard time
+  if (any(needs_dst_adjustment & !is.na(result))) {
+    result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
   }
 
   return(result)
@@ -531,8 +550,10 @@ ui <- fluidPage(
                    tags$li("Separators: dashes (-), slashes (/), spaces, or none"),
                    tags$li("Compact: ddmmYYYYHHMMSS or mmddYYYYHHMMSS"),
                    tags$li("12-hour format with AM/PM"),
-                   tags$li("Separate columns for year, month, day, hour, minute")
+                   tags$li("Separate columns for year, month, day, hour, minute"),
+                   tags$li("Timezone abbreviations: PST, EST, CST, MST, PDT, EDT, CDT, MDT, etc.")
                  ),
+                 p(em("Daylight time zones (PDT, EDT, CDT, MDT) are automatically converted to standard time.")),
                  h4("Wind Speed Units Supported"),
                  tags$ul(
                    tags$li("mph - miles per hour"),
@@ -561,7 +582,7 @@ ui <- fluidPage(
                    tags$li("Wind direction in degrees (0-360)"),
                    tags$li("Temperature in Fahrenheit (if provided)")
                  ),
-                 p(em("Note: All times are treated as local standard time year-round (no DST adjustment)."))
+                 p(em("Note: All output times are in local standard time. Daylight time inputs are adjusted automatically."))
         )
       )
     )
