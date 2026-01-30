@@ -345,6 +345,17 @@ parse_datetime_string <- function(datetime_str) {
 detect_units <- function(col_name, data_values = NULL) {
   col_lower <- tolower(col_name)
 
+  # Wind gust detection (check before general speed)
+  if (grepl("gust|gst|peak.*wind|max.*wind|wind.*max|wind.*peak", col_lower)) {
+    # Check for units in gust column name
+    if (grepl("mph|mi.*h|mile", col_lower)) return(list(type = "gust", unit = "mph"))
+    if (grepl("km.*h|kmh|kph", col_lower)) return(list(type = "gust", unit = "kmh"))
+    if (grepl("m.*s|ms|mps|meter.*sec", col_lower)) return(list(type = "gust", unit = "ms"))
+    if (grepl("knot|kt|kn", col_lower)) return(list(type = "gust", unit = "knots"))
+    if (grepl("ft.*s|fps", col_lower)) return(list(type = "gust", unit = "fts"))
+    return(list(type = "gust", unit = "unknown"))
+  }
+
   # Wind speed units
   if (grepl("mph|mi.*h|mile", col_lower)) return(list(type = "speed", unit = "mph"))
   if (grepl("km.*h|kmh|kph", col_lower)) return(list(type = "speed", unit = "kmh"))
@@ -462,7 +473,7 @@ vector_average_direction <- function(directions, speeds = NULL) {
 
 #' Perform hourly averaging on the dataset
 hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NULL,
-                           speed_unit, temp_unit = NULL) {
+                           gust_col = NULL, speed_unit, gust_unit = NULL, temp_unit = NULL) {
 
   # Ensure datetime is POSIXct
   data$datetime <- data[[datetime_col]]
@@ -473,48 +484,90 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
   # Create hour floor for grouping
   data$hour_group <- floor_date(data$datetime, unit = "hour")
 
-  # Get numeric values
-  data$wind_speed <- as.numeric(data[[speed_col]])
-  data$wind_dir <- as.numeric(data[[dir_col]])
-
-  if (!is.null(temp_col) && temp_col != "" && temp_col %in% names(data)) {
-    data$temperature <- as.numeric(data[[temp_col]])
-    has_temp <- TRUE
+  # Get numeric values - handle case where speed_col might be empty (gust only)
+  has_speed <- !is.null(speed_col) && speed_col != "" && speed_col %in% names(data)
+  if (has_speed) {
+    data$wind_speed <- as.numeric(data[[speed_col]])
   } else {
-    has_temp <- FALSE
+    data$wind_speed <- NA_real_
+  }
+
+  # Handle direction - might not exist if only gust data
+  has_dir <- !is.null(dir_col) && dir_col != "" && dir_col %in% names(data)
+  if (has_dir) {
+    data$wind_dir <- as.numeric(data[[dir_col]])
+  } else {
+    data$wind_dir <- NA_real_
+  }
+
+  # Handle gust data
+  has_gust <- !is.null(gust_col) && gust_col != "" && gust_col %in% names(data)
+  if (has_gust) {
+    data$wind_gust <- as.numeric(data[[gust_col]])
+  }
+
+  # Handle temperature
+  has_temp <- !is.null(temp_col) && temp_col != "" && temp_col %in% names(data)
+  if (has_temp) {
+    data$temperature <- as.numeric(data[[temp_col]])
   }
 
   # Group by hour and calculate averages
   hourly_data <- data %>%
     group_by(hour_group) %>%
     summarise(
-      wind_speed_avg = mean(wind_speed, na.rm = TRUE),
-      wind_dir_avg = vector_average_direction(wind_dir, wind_speed),
+      wind_speed_avg = if (has_speed) mean(wind_speed, na.rm = TRUE) else NA_real_,
+      wind_dir_avg = if (has_dir && has_speed) vector_average_direction(wind_dir, wind_speed)
+                     else if (has_dir) vector_average_direction(wind_dir) else NA_real_,
+      gust_max = if (has_gust) max(wind_gust, na.rm = TRUE) else NA_real_,
       temp_avg = if (has_temp) mean(temperature, na.rm = TRUE) else NA_real_,
       n_obs = n(),
       .groups = "drop"
     ) %>%
     arrange(hour_group)
 
+  # Handle infinite values from max() on empty data
+  if (has_gust) {
+    hourly_data$gust_max[is.infinite(hourly_data$gust_max)] <- NA_real_
+  }
+
   # Convert units
-  hourly_data$wind_speed_mph <- convert_to_mph(hourly_data$wind_speed_avg, speed_unit)
+  if (has_speed) {
+    hourly_data$wind_speed_mph <- convert_to_mph(hourly_data$wind_speed_avg, speed_unit)
+  }
+
+  if (has_gust) {
+    gust_unit_to_use <- if (!is.null(gust_unit) && gust_unit != "") gust_unit else speed_unit
+    hourly_data$gust_mph <- convert_to_mph(hourly_data$gust_max, gust_unit_to_use)
+  }
 
   if (has_temp && !is.null(temp_unit)) {
     hourly_data$temp_f <- convert_to_fahrenheit(hourly_data$temp_avg, temp_unit)
-  } else {
-    hourly_data$temp_f <- NA_real_
   }
 
   # Round direction to nearest degree
-  hourly_data$wind_dir_deg <- round(hourly_data$wind_dir_avg, 0)
+  if (has_dir) {
+    hourly_data$wind_dir_deg <- round(hourly_data$wind_dir_avg, 0)
+  }
 
   # Prepare output (no POSIX timestamp, just formatted datetime)
   output <- data.frame(
     DateTime = format(hourly_data$hour_group, "%Y-%m-%d %H:%M"),
-    Wind_Speed_mph = round(hourly_data$wind_speed_mph, 2),
-    Wind_Direction_deg = hourly_data$wind_dir_deg,
     stringsAsFactors = FALSE
   )
+
+  # Add columns based on what data is available
+  if (has_speed) {
+    output$Wind_Speed_mph <- round(hourly_data$wind_speed_mph, 2)
+  }
+
+  if (has_dir) {
+    output$Wind_Direction_deg <- hourly_data$wind_dir_deg
+  }
+
+  if (has_gust) {
+    output$Wind_Gust_mph <- round(hourly_data$gust_mph, 2)
+  }
 
   if (has_temp) {
     output$Temperature_F <- round(hourly_data$temp_f, 1)
@@ -596,7 +649,7 @@ ui <- fluidPage(
 
       # Wind speed configuration
       h4("Wind Speed"),
-      selectInput("speed_col", "Wind Speed Column:", choices = NULL),
+      selectInput("speed_col", "Wind Speed Column (optional if gust provided):", choices = NULL),
       selectInput("speed_unit", "Speed Units:",
                   choices = list(
                     "mph (miles per hour)" = "mph",
@@ -615,16 +668,17 @@ ui <- fluidPage(
 
       hr(),
 
+      # Wind gust configuration (optional)
+      h4("Wind Gust (Optional)"),
+      selectInput("gust_col", "Wind Gust Column:", choices = NULL),
+      uiOutput("gust_unit_ui"),
+
+      hr(),
+
       # Temperature configuration (optional)
       h4("Temperature (Optional)"),
       selectInput("temp_col", "Temperature Column:", choices = NULL),
-      selectInput("temp_unit", "Temperature Units:",
-                  choices = list(
-                    "Fahrenheit (°F)" = "F",
-                    "Celsius (°C)" = "C",
-                    "Kelvin (K)" = "K"
-                  ),
-                  selected = "F"),
+      uiOutput("temp_unit_ui"),
 
       hr(),
 
@@ -706,17 +760,20 @@ ui <- fluidPage(
                  tags$ul(
                    tags$li(strong("Wind Direction:"), " Vector averaging using u/v component decomposition"),
                    tags$li(strong("Wind Speed:"), " Scalar (arithmetic) mean"),
+                   tags$li(strong("Wind Gust:"), " Maximum value per hour"),
                    tags$li(strong("Temperature:"), " Scalar (arithmetic) mean")
                  ),
                  h4("Output"),
-                 p("The processed data includes:"),
+                 p("The processed data includes (columns shown only if data available):"),
                  tags$ul(
                    tags$li("DateTime (YYYY-MM-DD HH:MM)"),
                    tags$li("Wind speed in mph"),
                    tags$li("Wind direction in degrees (0-360)"),
-                   tags$li("Temperature in Fahrenheit (if provided)")
+                   tags$li("Wind gust in mph (hourly maximum)"),
+                   tags$li("Temperature in Fahrenheit")
                  ),
-                 p(em("Note: All output times are in local standard time. Daylight time inputs are adjusted automatically."))
+                 p(em("Note: At least wind speed OR wind gust must be provided. Temperature and direction are optional.")),
+                 p(em("All output times are in local standard time. Daylight time inputs are adjusted automatically."))
         )
       )
     )
@@ -760,25 +817,36 @@ server <- function(input, output, session) {
       updateSelectInput(session, "hour_col", choices = col_choices)
       updateSelectInput(session, "minute_col", choices = col_choices_optional)
 
-      updateSelectInput(session, "speed_col", choices = col_choices)
-      updateSelectInput(session, "dir_col", choices = col_choices)
+      updateSelectInput(session, "speed_col", choices = col_choices_optional)
+      updateSelectInput(session, "dir_col", choices = col_choices_optional)
+      updateSelectInput(session, "gust_col", choices = col_choices_optional)
       updateSelectInput(session, "temp_col", choices = col_choices_optional)
+
+      # Track detected units for gust and temp
+      detected_gust_unit <- NULL
+      detected_temp_unit <- NULL
 
       # Try to auto-detect columns based on names
       for (i in seq_along(col_names)) {
         col_name <- col_names[i]
         detected <- detect_units(col_name, data[[col_name]])
 
+        unit_map <- c("mph" = "mph", "ms" = "ms", "m/s" = "ms",
+                      "kmh" = "kmh", "km/h" = "kmh", "kph" = "kmh",
+                      "knots" = "knots", "kn" = "knots", "kt" = "knots",
+                      "fts" = "fts", "ft/s" = "fts")
+
         if (detected$type == "speed") {
           updateSelectInput(session, "speed_col", selected = col_name)
-          if (detected$unit != "unknown") {
-            unit_map <- c("mph" = "mph", "ms" = "ms", "m/s" = "ms",
-                          "kmh" = "kmh", "km/h" = "kmh", "kph" = "kmh",
-                          "knots" = "knots", "kn" = "knots", "kt" = "knots",
-                          "fts" = "fts", "ft/s" = "fts")
-            if (detected$unit %in% names(unit_map)) {
-              updateSelectInput(session, "speed_unit", selected = unit_map[detected$unit])
-            }
+          if (detected$unit != "unknown" && detected$unit %in% names(unit_map)) {
+            updateSelectInput(session, "speed_unit", selected = unit_map[detected$unit])
+          }
+        }
+
+        if (detected$type == "gust") {
+          updateSelectInput(session, "gust_col", selected = col_name)
+          if (detected$unit != "unknown" && detected$unit %in% names(unit_map)) {
+            detected_gust_unit <<- unit_map[detected$unit]
           }
         }
 
@@ -789,7 +857,7 @@ server <- function(input, output, session) {
         if (detected$type == "temp") {
           updateSelectInput(session, "temp_col", selected = col_name)
           if (detected$unit != "unknown") {
-            updateSelectInput(session, "temp_unit", selected = detected$unit)
+            detected_temp_unit <<- detected$unit
           }
         }
       }
@@ -897,6 +965,37 @@ server <- function(input, output, session) {
                        selected = qc_values)  # Default: all selected
   })
 
+  # Conditional gust units selector - only show if gust column is selected
+  output$gust_unit_ui <- renderUI({
+    req(input$gust_col)
+    if (input$gust_col == "") return(NULL)
+
+    selectInput("gust_unit", "Gust Units:",
+                choices = list(
+                  "Same as wind speed" = "",
+                  "mph (miles per hour)" = "mph",
+                  "m/s (meters per second)" = "ms",
+                  "km/h (kilometers per hour)" = "kmh",
+                  "knots" = "knots",
+                  "ft/s (feet per second)" = "fts"
+                ),
+                selected = "")
+  })
+
+  # Conditional temperature units selector - only show if temp column is selected
+  output$temp_unit_ui <- renderUI({
+    req(input$temp_col)
+    if (input$temp_col == "") return(NULL)
+
+    selectInput("temp_unit", "Temperature Units:",
+                choices = list(
+                  "Fahrenheit (°F)" = "F",
+                  "Celsius (°C)" = "C",
+                  "Kelvin (K)" = "K"
+                ),
+                selected = "F")
+  })
+
   # Handle reshape button for long format data
   observeEvent(input$apply_reshape, {
     req(uploaded_data(), input$is_long_format)
@@ -935,8 +1034,9 @@ server <- function(input, output, session) {
 
       updateSelectInput(session, "datetime_col", choices = col_choices, selected = col_names[1])
       updateSelectInput(session, "date_col", choices = col_choices, selected = col_names[1])
-      updateSelectInput(session, "speed_col", choices = col_choices)
-      updateSelectInput(session, "dir_col", choices = col_choices)
+      updateSelectInput(session, "speed_col", choices = col_choices_optional)
+      updateSelectInput(session, "dir_col", choices = col_choices_optional)
+      updateSelectInput(session, "gust_col", choices = col_choices_optional)
       updateSelectInput(session, "temp_col", choices = col_choices_optional)
 
       # Try to auto-detect columns in reshaped data
@@ -944,6 +1044,9 @@ server <- function(input, output, session) {
         detected <- detect_units(col_name, wide_data[[col_name]])
         if (detected$type == "speed") {
           updateSelectInput(session, "speed_col", selected = col_name)
+        }
+        if (detected$type == "gust") {
+          updateSelectInput(session, "gust_col", selected = col_name)
         }
         if (detected$type == "direction") {
           updateSelectInput(session, "dir_col", selected = col_name)
@@ -1001,7 +1104,34 @@ server <- function(input, output, session) {
     if (is.null(data)) {
       data <- uploaded_data()
     }
-    req(data)
+
+    # Validation: Check if data exists
+    if (is.null(data) || nrow(data) == 0) {
+      showNotification("No data loaded. Please upload a valid data file.", type = "error")
+      return()
+    }
+
+    # Validation: Check if we have at least speed OR gust data
+    has_speed <- !is.null(input$speed_col) && input$speed_col != "" && input$speed_col %in% names(data)
+    has_gust <- !is.null(input$gust_col) && input$gust_col != "" && input$gust_col %in% names(data)
+
+    if (!has_speed && !has_gust) {
+      showNotification("Warning: No wind speed or gust column selected. Please select at least one wind data column.",
+                       type = "error")
+      return()
+    }
+
+    # Validation: Check if selected columns exist in data
+    col_names <- names(data)
+    warnings_list <- c()
+
+    if (has_speed && !all(sapply(data[[input$speed_col]], function(x) is.na(x) || is.numeric(as.numeric(x))))) {
+      warnings_list <- c(warnings_list, "Wind speed column contains non-numeric values")
+    }
+
+    if (has_gust && !all(sapply(data[[input$gust_col]], function(x) is.na(x) || is.numeric(as.numeric(x))))) {
+      warnings_list <- c(warnings_list, "Wind gust column contains non-numeric values")
+    }
 
     tryCatch({
       # Parse datetime based on selected mode
@@ -1023,38 +1153,66 @@ server <- function(input, output, session) {
       # Check if parsing was successful
       valid_dates <- sum(!is.na(data$parsed_datetime))
       if (valid_dates == 0) {
-        showNotification("Could not parse any dates. Please check the date/time format.", type = "error")
+        showNotification("Could not parse any dates. Please check the date/time column selection and format. This may not be the correct input file.",
+                         type = "error", duration = 10)
         return()
       }
 
       if (valid_dates < nrow(data)) {
-        showNotification(sprintf("Warning: %d of %d rows had unparseable dates",
-                                 nrow(data) - valid_dates, nrow(data)), type = "warning")
+        pct_failed <- round((nrow(data) - valid_dates) / nrow(data) * 100, 1)
+        showNotification(sprintf("Warning: %d of %d rows (%.1f%%) had unparseable dates",
+                                 nrow(data) - valid_dates, nrow(data), pct_failed),
+                         type = "warning", duration = 8)
       }
 
       # Filter out rows with invalid dates
       data <- data[!is.na(data$parsed_datetime), ]
 
+      # Additional validation after filtering
+      if (nrow(data) == 0) {
+        showNotification("No valid data rows remaining after date parsing. Please check if this is the correct file.",
+                         type = "error")
+        return()
+      }
+
       # Perform hourly averaging
       result <- hourly_average(
         data = data,
         datetime_col = "parsed_datetime",
-        speed_col = input$speed_col,
+        speed_col = if (has_speed) input$speed_col else NULL,
         dir_col = input$dir_col,
-        temp_col = if (input$temp_col != "") input$temp_col else NULL,
+        temp_col = if (!is.null(input$temp_col) && input$temp_col != "") input$temp_col else NULL,
+        gust_col = if (has_gust) input$gust_col else NULL,
         speed_unit = input$speed_unit,
-        temp_unit = if (input$temp_col != "") input$temp_unit else NULL
+        gust_unit = if (has_gust && !is.null(input$gust_unit) && input$gust_unit != "") input$gust_unit else NULL,
+        temp_unit = if (!is.null(input$temp_col) && input$temp_col != "" && !is.null(input$temp_unit)) input$temp_unit else NULL
       )
+
+      # Check if result has any data columns beyond DateTime
+      if (ncol(result) <= 1) {
+        showNotification("Warning: No wind data columns in output. Please verify column selections.",
+                         type = "warning")
+      }
 
       processed_data(result)
 
-      showNotification(sprintf("Successfully processed %d hours of data", nrow(result)), type = "message")
+      # Build success message
+      data_types <- c()
+      if ("Wind_Speed_mph" %in% names(result)) data_types <- c(data_types, "speed")
+      if ("Wind_Direction_deg" %in% names(result)) data_types <- c(data_types, "direction")
+      if ("Wind_Gust_mph" %in% names(result)) data_types <- c(data_types, "gust")
+      if ("Temperature_F" %in% names(result)) data_types <- c(data_types, "temperature")
+
+      showNotification(sprintf("Successfully processed %d hours of data (%s)",
+                               nrow(result), paste(data_types, collapse = ", ")),
+                       type = "message")
 
       # Switch to results tab
       updateTabsetPanel(session, "tabsetPanel", selected = "Processed Data")
 
     }, error = function(e) {
-      showNotification(paste("Error processing data:", e$message), type = "error")
+      showNotification(paste("Error processing data. Please check if this is the correct file format:", e$message),
+                       type = "error", duration = 10)
     })
   })
 
@@ -1074,16 +1232,31 @@ server <- function(input, output, session) {
     cat("Summary Statistics:\n")
     cat(sprintf("  Total hours: %d\n", nrow(data)))
     cat(sprintf("  Date range: %s to %s\n", min(data$DateTime), max(data$DateTime)))
-    cat("\nWind Speed (mph):\n")
-    cat(sprintf("  Min: %.2f\n", min(data$Wind_Speed_mph, na.rm = TRUE)))
-    cat(sprintf("  Max: %.2f\n", max(data$Wind_Speed_mph, na.rm = TRUE)))
-    cat(sprintf("  Mean: %.2f\n", mean(data$Wind_Speed_mph, na.rm = TRUE)))
-    cat("\nWind Direction (degrees):\n")
-    cat(sprintf("  Most common quadrant: %s\n",
-                c("N", "E", "S", "W")[which.max(table(cut(data$Wind_Direction_deg,
-                                                          breaks = c(0, 90, 180, 270, 360),
-                                                          labels = c("N", "E", "S", "W"),
-                                                          include.lowest = TRUE)))]))
+
+    if ("Wind_Speed_mph" %in% names(data) && sum(!is.na(data$Wind_Speed_mph)) > 0) {
+      cat("\nWind Speed (mph):\n")
+      cat(sprintf("  Min: %.2f\n", min(data$Wind_Speed_mph, na.rm = TRUE)))
+      cat(sprintf("  Max: %.2f\n", max(data$Wind_Speed_mph, na.rm = TRUE)))
+      cat(sprintf("  Mean: %.2f\n", mean(data$Wind_Speed_mph, na.rm = TRUE)))
+    }
+
+    if ("Wind_Direction_deg" %in% names(data) && sum(!is.na(data$Wind_Direction_deg)) > 0) {
+      cat("\nWind Direction (degrees):\n")
+      dir_table <- table(cut(data$Wind_Direction_deg,
+                             breaks = c(0, 90, 180, 270, 360),
+                             labels = c("N", "E", "S", "W"),
+                             include.lowest = TRUE))
+      if (length(dir_table) > 0) {
+        cat(sprintf("  Most common quadrant: %s\n", c("N", "E", "S", "W")[which.max(dir_table)]))
+      }
+    }
+
+    if ("Wind_Gust_mph" %in% names(data) && sum(!is.na(data$Wind_Gust_mph)) > 0) {
+      cat("\nWind Gust (mph):\n")
+      cat(sprintf("  Min: %.2f\n", min(data$Wind_Gust_mph, na.rm = TRUE)))
+      cat(sprintf("  Max: %.2f\n", max(data$Wind_Gust_mph, na.rm = TRUE)))
+      cat(sprintf("  Mean: %.2f\n", mean(data$Wind_Gust_mph, na.rm = TRUE)))
+    }
 
     if ("Temperature_F" %in% names(data) && sum(!is.na(data$Temperature_F)) > 0) {
       cat("\nTemperature (°F):\n")
