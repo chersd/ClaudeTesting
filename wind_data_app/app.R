@@ -86,7 +86,7 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
                             as.numeric(day_vals),
                             as.numeric(hour_vals),
                             as.numeric(minute_vals))
-    return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "Etc/GMT"))
+    return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = ""))
   }
 
   # Case 2: Single datetime column or date + time columns
@@ -182,7 +182,7 @@ parse_datetime_string <- function(datetime_str) {
                        "%Y-%m-%d %I:%M:%S %p", "%Y/%m/%d %I:%M:%S %p",
                        "%Y-%m-%d %I:%M %p", "%Y/%m/%d %I:%M %p")
     for (fmt in am_pm_formats) {
-      parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "Etc/GMT")
+      parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "")
       if (sum(!is.na(parsed)) > sum(!is.na(result[am_pm_idx]))) {
         result[am_pm_idx] <- parsed
       }
@@ -200,7 +200,7 @@ parse_datetime_string <- function(datetime_str) {
         numeric_idx <- grepl("^\\d{9,10}$", remaining_str)
         if (any(numeric_idx)) {
           posix_vals <- as.numeric(remaining_str[numeric_idx])
-          parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "Etc/GMT")
+          parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "")
           temp_result <- result[remaining_idx]
           temp_result[numeric_idx] <- parsed_posix
           result[remaining_idx] <- temp_result
@@ -215,7 +215,7 @@ parse_datetime_string <- function(datetime_str) {
             temp_str <- gsub("Z$", "", temp_str)
             # Remove timezone offset
             temp_str <- gsub("[+-]\\d{2}:\\d{2}$", "", temp_str)
-            parsed <- as.POSIXct(temp_str, format = fmt, tz = "Etc/GMT")
+            parsed <- as.POSIXct(temp_str, format = fmt, tz = "")
 
             temp_result <- result[remaining_idx]
             temp_still_na <- is.na(temp_result)
@@ -364,7 +364,7 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
   # Ensure datetime is POSIXct
   data$datetime <- data[[datetime_col]]
   if (!inherits(data$datetime, "POSIXct")) {
-    data$datetime <- as.POSIXct(data$datetime, tz = "Etc/GMT")
+    data$datetime <- as.POSIXct(data$datetime, tz = "")
   }
 
   # Create hour floor for grouping
