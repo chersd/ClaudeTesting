@@ -570,6 +570,15 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
     hourly_data$wind_dir_deg <- round(hourly_data$wind_dir_avg, 0)
   }
 
+  # Calculate u and v wind vector components (using output speed in mph)
+  # u = east-west component (positive = wind from west)
+  # v = north-south component (positive = wind from south)
+  if (has_speed && has_dir) {
+    dir_rad <- hourly_data$wind_dir_avg * pi / 180
+    hourly_data$u_mph <- hourly_data$wind_speed_mph * sin(dir_rad)
+    hourly_data$v_mph <- hourly_data$wind_speed_mph * cos(dir_rad)
+  }
+
   # Prepare output (no POSIX timestamp, just formatted datetime)
   output <- data.frame(
     DateTime = format(hourly_data$hour_group, "%Y-%m-%d %H:%M"),
@@ -583,6 +592,12 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
 
   if (has_dir) {
     output$Wind_Direction_deg <- hourly_data$wind_dir_deg
+  }
+
+  # Add u and v components if both speed and direction are available
+  if (has_speed && has_dir) {
+    output$U_mph <- round(hourly_data$u_mph, 3)
+    output$V_mph <- round(hourly_data$v_mph, 3)
   }
 
   if (has_gust) {
@@ -789,10 +804,13 @@ ui <- fluidPage(
                    tags$li("DateTime (YYYY-MM-DD HH:MM)"),
                    tags$li("Wind speed in mph"),
                    tags$li("Wind direction in degrees (0-360)"),
+                   tags$li("U_mph - east-west wind vector component (positive = from west)"),
+                   tags$li("V_mph - north-south wind vector component (positive = from south)"),
                    tags$li("Wind gust in mph (hourly maximum)"),
                    tags$li("Temperature in Fahrenheit")
                  ),
-                 p(em("Note: At least wind speed OR wind gust must be provided. Temperature and direction are optional.")),
+                 p(em("Note: U and V components are included when both speed and direction are available.")),
+                 p(em("At least wind speed OR wind gust must be provided. Temperature and direction are optional.")),
                  p(em("All output times are in local standard time. Daylight time inputs are adjusted automatically."))
         )
       )
