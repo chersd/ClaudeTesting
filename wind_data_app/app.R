@@ -338,6 +338,26 @@ parse_datetime_string <- function(datetime_str) {
     result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
   }
 
+  # Fix 2-digit years that weren't properly converted
+  # R's %y format sometimes doesn't work as expected, so we fix years < 100
+  valid_idx <- !is.na(result)
+  if (any(valid_idx)) {
+    years <- as.numeric(format(result[valid_idx], "%Y"))
+    needs_fix <- years < 100
+    if (any(needs_fix)) {
+      # Convert: 0-50 -> 2000-2050, 51-99 -> 1951-1999
+      fix_idx <- which(valid_idx)[needs_fix]
+      for (i in fix_idx) {
+        # Extract components and rebuild with correct year
+        yr <- as.numeric(format(result[i], "%Y"))
+        new_year <- if (yr <= 50) 2000 + yr else 1900 + yr
+        # Rebuild the datetime string with correct year
+        new_dt_str <- format(result[i], paste0(new_year, "-%m-%d %H:%M:%S"))
+        result[i] <- as.POSIXct(new_dt_str, format = "%Y-%m-%d %H:%M:%S", tz = "")
+      }
+    }
+  }
+
   return(result)
 }
 
