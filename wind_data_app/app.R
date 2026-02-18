@@ -579,7 +579,7 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
     hourly_data$v_mph <- hourly_data$wind_speed_mph * cos(dir_rad)
   }
 
-  # Prepare output (no POSIX timestamp, just formatted datetime)
+  # Prepare hourly output (no POSIX timestamp, just formatted datetime)
   output <- data.frame(
     DateTime = format(hourly_data$hour_group, "%Y-%m-%d %H:%M"),
     stringsAsFactors = FALSE
@@ -608,7 +608,37 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
     output$Temperature_F <- round(hourly_data$temp_f, 1)
   }
 
-  return(output)
+  # Prepare sub-hourly output with consistent column names, units, and date format
+  subhourly <- data.frame(
+    DateTime = format(data$datetime, "%Y-%m-%d %H:%M"),
+    stringsAsFactors = FALSE
+  )
+
+  if (has_speed) {
+    subhourly$Wind_Speed_mph <- round(convert_to_mph(data$wind_speed, speed_unit), 2)
+  }
+
+  if (has_dir) {
+    subhourly$Wind_Direction_deg <- round(data$wind_dir, 0)
+  }
+
+  if (has_speed && has_dir) {
+    dir_rad_sub <- data$wind_dir * pi / 180
+    speed_mph_sub <- convert_to_mph(data$wind_speed, speed_unit)
+    subhourly$U_mph <- round(speed_mph_sub * sin(dir_rad_sub), 3)
+    subhourly$V_mph <- round(speed_mph_sub * cos(dir_rad_sub), 3)
+  }
+
+  if (has_gust) {
+    gust_unit_to_use <- if (!is.null(gust_unit) && gust_unit != "") gust_unit else speed_unit
+    subhourly$Wind_Gust_mph <- round(convert_to_mph(data$wind_gust, gust_unit_to_use), 2)
+  }
+
+  if (has_temp && !is.null(temp_unit)) {
+    subhourly$Temperature_F <- round(convert_to_fahrenheit(data$temperature, temp_unit), 1)
+  }
+
+  return(list(hourly = output, subhourly = subhourly))
 }
 
 # ============================================================================
@@ -721,7 +751,8 @@ ui <- fluidPage(
 
       hr(),
 
-      downloadButton("download", "Download Results")
+      downloadButton("download", "Download Hourly Results"),
+      downloadButton("download_subhourly", "Download Sub-Hourly Results")
     ),
 
     mainPanel(
@@ -739,6 +770,10 @@ ui <- fluidPage(
                  h4("Hourly Averaged Data"),
                  p("Wind direction: vector averaged | Wind speed & temperature: scalar averaged"),
                  DTOutput("result_table"),
+                 hr(),
+                 h4("Sub-Hourly Data (Standardized)"),
+                 p("Original time resolution with consistent column names, date format, and units (mph / °F)"),
+                 DTOutput("subhourly_table"),
                  hr(),
                  h4("Summary Statistics"),
                  verbatimTextOutput("summary_stats")
@@ -1227,22 +1262,23 @@ server <- function(input, output, session) {
       )
 
       # Check if result has any data columns beyond DateTime
-      if (ncol(result) <= 1) {
+      if (ncol(result$hourly) <= 1) {
         showNotification("Warning: No wind data columns in output. Please verify column selections.",
                          type = "warning")
       }
 
       processed_data(result)
 
-      # Build success message
+      # Build success message (inspect the hourly data frame)
+      hourly_result <- result$hourly
       data_types <- c()
-      if ("Wind_Speed_mph" %in% names(result)) data_types <- c(data_types, "speed")
-      if ("Wind_Direction_deg" %in% names(result)) data_types <- c(data_types, "direction")
-      if ("Wind_Gust_mph" %in% names(result)) data_types <- c(data_types, "gust")
-      if ("Temperature_F" %in% names(result)) data_types <- c(data_types, "temperature")
+      if ("Wind_Speed_mph" %in% names(hourly_result)) data_types <- c(data_types, "speed")
+      if ("Wind_Direction_deg" %in% names(hourly_result)) data_types <- c(data_types, "direction")
+      if ("Wind_Gust_mph" %in% names(hourly_result)) data_types <- c(data_types, "gust")
+      if ("Temperature_F" %in% names(hourly_result)) data_types <- c(data_types, "temperature")
 
       showNotification(sprintf("Successfully processed %d hours of data (%s)",
-                               nrow(result), paste(data_types, collapse = ", ")),
+                               nrow(hourly_result), paste(data_types, collapse = ", ")),
                        type = "message")
 
       # Switch to results tab
@@ -1254,18 +1290,26 @@ server <- function(input, output, session) {
     })
   })
 
-  # Result table
+  # Result table (hourly)
   output$result_table <- renderDT({
     req(processed_data())
-    datatable(processed_data(),
+    datatable(processed_data()$hourly,
               options = list(scrollX = TRUE, pageLength = 25),
               caption = "Hourly averaged wind data")
+  })
+
+  # Sub-hourly result table
+  output$subhourly_table <- renderDT({
+    req(processed_data())
+    datatable(processed_data()$subhourly,
+              options = list(scrollX = TRUE, pageLength = 25),
+              caption = "Sub-hourly data (original resolution, standardized columns and units)")
   })
 
   # Summary statistics
   output$summary_stats <- renderPrint({
     req(processed_data())
-    data <- processed_data()
+    data <- processed_data()$hourly
 
     cat("Summary Statistics:\n")
     cat(sprintf("  Total hours: %d\n", nrow(data)))
@@ -1304,14 +1348,25 @@ server <- function(input, output, session) {
     }
   })
 
-  # Download handler
+  # Download handler - hourly data
   output$download <- downloadHandler(
     filename = function() {
       paste0("wind_data_hourly_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
     },
     content = function(file) {
       req(processed_data())
-      write.csv(processed_data(), file, row.names = FALSE)
+      write.csv(processed_data()$hourly, file, row.names = FALSE)
+    }
+  )
+
+  # Download handler - sub-hourly data
+  output$download_subhourly <- downloadHandler(
+    filename = function() {
+      paste0("wind_data_subhourly_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      req(processed_data())
+      write.csv(processed_data()$subhourly, file, row.names = FALSE)
     }
   )
 }
