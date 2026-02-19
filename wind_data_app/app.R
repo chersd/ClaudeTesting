@@ -1502,7 +1502,28 @@ server <- function(input, output, session) {
   })
 
   # Process pollutant data and generate plot with wind overlay
-  observeEvent(input$process_pollutant, {
+  # Reactive helper: compute the max pollutant value across ALL sites for the
+  # selected parameters and dates so every per-site plot shares the same Y-axis.
+  global_y_max <- reactive({
+    req(pollutant_raw(), input$selected_params, input$selected_poll_dates)
+    poll_data <- pollutant_raw()
+    sel_params <- input$selected_params
+    sel_dates  <- as.Date(input$selected_poll_dates)
+
+    sub <- poll_data[poll_data$parameter %in% sel_params, ]
+    sub$parsed_date <- parse_datetime_string(
+      as.character(sub$date_LT_shifted_to_selected_timezone))
+    sub <- sub[!is.na(sub$parsed_date) &
+               as.Date(sub$parsed_date) %in% sel_dates, ]
+    sub$sample_measurement <- as.numeric(sub$sample_measurement)
+    sub <- sub[is.finite(sub$sample_measurement), ]
+
+    if (nrow(sub) == 0) return(1)
+    max(sub$sample_measurement, na.rm = TRUE)
+  })
+
+  # Helper function containing the plot generation logic
+  generate_pollutant_plot <- function() {
     req(pollutant_raw(), processed_data(),
         input$selected_site, input$selected_params, input$selected_poll_dates)
     tryCatch({
@@ -1555,9 +1576,10 @@ server <- function(input, output, session) {
         pivot_wider(names_from = parameter, values_from = sample_measurement) %>%
         as.data.frame()
 
-      # Build complete hourly time grid spanning selected dates
-      date_min <- min(wide_poll$date_hour, na.rm = TRUE)
-      date_max <- max(wide_poll$date_hour, na.rm = TRUE)
+      # Build complete hourly time grid: midnight on first selected day
+      # through 11 PM on last selected day
+      date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "")
+      date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "")
       all_hours <- seq(from = date_min, to = date_max, by = "hour")
       time_grid <- data.frame(date_hour = all_hours, stringsAsFactors = FALSE)
 
@@ -1574,7 +1596,6 @@ server <- function(input, output, session) {
       # Prepare wind data: prefer sub-hourly, fall back to hourly
       # Parse wind datetimes
       wind_df <- NULL
-      wind_label_prefix <- ""
 
       if (!is.null(met_subhourly) && nrow(met_subhourly) > 0) {
         sh <- met_subhourly
@@ -1587,7 +1608,6 @@ server <- function(input, output, session) {
           if ("Wind_Speed_mph" %in% names(sh))
             wind_df$ws <- as.numeric(sh$Wind_Speed_mph)
           wind_df <- wind_df[order(wind_df$date), ]
-          wind_label_prefix <- "Sub-hourly "
         }
       }
 
@@ -1603,7 +1623,6 @@ server <- function(input, output, session) {
           if ("Wind_Speed_mph" %in% names(hr))
             wind_df$ws <- as.numeric(hr$Wind_Speed_mph)
           wind_df <- wind_df[order(wind_df$date), ]
-          wind_label_prefix <- ""
         }
       }
 
@@ -1671,9 +1690,9 @@ server <- function(input, output, session) {
         txtCols <- c(txtCols, rgb(0.5, 0.8, 1, alpha = 0.8))
       }
 
-      # Y-axis max for bars
-      all_bar_vals <- c(bar_primary, bar_secondary)
-      y_max <- max(all_bar_vals, na.rm = TRUE) * 1.5
+      # Y-axis max for bars — use global max across ALL sites (with 1.4x buffer)
+      g_max <- global_y_max()
+      y_max <- g_max * 1.4
       if (!is.finite(y_max) || y_max == 0) y_max <- 1
 
       # Wind y-axis max
@@ -1745,8 +1764,8 @@ server <- function(input, output, session) {
       leg_lwd <- c(rep(NA, length(txtCols)), 3, 3, 3)
       leg_col <- c(rep(NA, length(txtCols)), 6, 1, 1)
       leg_txtcol <- c(txtCols, 6, 1, 1)
-      gust_label <- paste0(wind_label_prefix, "1hr max gust @ ", met_site)
-      ws_label <- paste0(wind_label_prefix, "Avg wind @ ", met_site)
+      gust_label <- paste0("Max gust @ ", met_site)
+      ws_label <- paste0("Avg wind @ ", met_site)
       leg_labels <- c(concSpec, gust_label, ws_label, "Wind threshold")
 
       legend("topleft", ncol = 3,
@@ -1768,6 +1787,18 @@ server <- function(input, output, session) {
       showNotification(paste("Error processing pollutant data:", e$message),
                        type = "error", duration = 10)
     })
+  }
+
+  # Trigger plot generation from the button
+  observeEvent(input$process_pollutant, {
+    generate_pollutant_plot()
+  })
+
+  # Auto-regenerate plot when site, parameters, or dates change
+  observeEvent(list(input$selected_site, input$selected_params, input$selected_poll_dates), {
+    # Only auto-regenerate if the plot has been generated at least once
+    req(pollutant_plot_path())
+    generate_pollutant_plot()
   })
 
   # Render the pollutant plot as base64 image
