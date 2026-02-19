@@ -8,6 +8,7 @@ library(lubridate)
 library(DT)
 library(readxl)
 library(tidyr)
+library(base64enc)
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -659,6 +660,10 @@ ui <- fluidPage(
                            "application/vnd.ms-excel",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
 
+      # Meteorological site name
+      textInput("met_data_site", "Meteorological Site Name:",
+                placeholder = "e.g., KVNY, KLAX"),
+
       hr(),
 
       # Long format configuration
@@ -752,7 +757,22 @@ ui <- fluidPage(
       hr(),
 
       downloadButton("download", "Download Hourly Results"),
-      downloadButton("download_subhourly", "Download Sub-Hourly Results")
+      downloadButton("download_subhourly", "Download Sub-Hourly Results"),
+
+      hr(),
+
+      # ---- Pollutant Data Section ----
+      h3("Pollutant Data"),
+
+      fileInput("pollutant_file", "Upload Pollutant CSV (Long Format)",
+                accept = c(".csv", "text/csv")),
+
+      uiOutput("site_name_selector"),
+      uiOutput("pollutant_param_selector"),
+      uiOutput("pollutant_date_selector"),
+
+      actionButton("process_pollutant", "Process & Plot Pollutant Data",
+                    class = "btn-success btn-lg")
     ),
 
     mainPanel(
@@ -777,6 +797,14 @@ ui <- fluidPage(
                  hr(),
                  h4("Summary Statistics"),
                  verbatimTextOutput("summary_stats")
+        ),
+
+        tabPanel("Pollutant Plot",
+                 h4("Pollutant vs Wind Data"),
+                 uiOutput("pollutant_plot_ui"),
+                 hr(),
+                 h4("Merged Data Preview"),
+                 DTOutput("merged_data_table")
         ),
 
         tabPanel("Help",
@@ -1369,6 +1397,369 @@ server <- function(input, output, session) {
       write.csv(processed_data()$subhourly, file, row.names = FALSE)
     }
   )
+
+  # ========================================================================
+  # POLLUTANT DATA SECTION
+  # ========================================================================
+
+  pollutant_raw <- reactiveVal(NULL)
+  merged_result <- reactiveVal(NULL)
+  pollutant_plot_path <- reactiveVal(NULL)
+
+  # Handle pollutant file upload
+  observeEvent(input$pollutant_file, {
+    req(input$pollutant_file)
+    tryCatch({
+      data <- read.csv(input$pollutant_file$datapath, stringsAsFactors = FALSE,
+                        check.names = FALSE,
+                        na.strings = c("", "NA", "N/A", "null", "-"))
+      col_names <- names(data)
+      col_lower <- tolower(col_names)
+
+      # Normalize column names to canonical forms
+      param_idx <- which(col_lower %in% c("parameter", "param"))
+      if (length(param_idx) > 0) names(data)[param_idx[1]] <- "parameter"
+
+      conc_idx <- which(col_lower %in% c("sample_measurement", "conc", "concentration"))
+      if (length(conc_idx) > 0) names(data)[conc_idx[1]] <- "sample_measurement"
+
+      unit_idx <- which(col_lower %in% c("units_of_measure", "units", "unit"))
+      if (length(unit_idx) > 0) names(data)[unit_idx[1]] <- "units_of_measure"
+
+      date_idx <- which(col_lower %in% c("date_lt_shifted_to_selected_timezone",
+                                           "date_lt", "date"))
+      if (length(date_idx) > 0) names(data)[date_idx[1]] <- "date_LT_shifted_to_selected_timezone"
+
+      site_idx <- which(col_lower %in% c("sitename", "site_name", "site"))
+      if (length(site_idx) > 0) names(data)[site_idx[1]] <- "SiteName"
+
+      pollutant_raw(data)
+      showNotification(sprintf("Pollutant file loaded: %d rows, %d columns",
+                               nrow(data), ncol(data)), type = "message")
+    }, error = function(e) {
+      showNotification(paste("Error reading pollutant file:", e$message), type = "error")
+    })
+  })
+
+  # SiteName selector (single selection)
+  output$site_name_selector <- renderUI({
+    req(pollutant_raw())
+    data <- pollutant_raw()
+    if (!("SiteName" %in% names(data))) return(NULL)
+    sites <- sort(unique(as.character(data$SiteName)))
+    sites <- sites[!is.na(sites) & sites != ""]
+    selectInput("selected_site", "Select Pollutant Site:",
+                choices = sites, selected = sites[1], multiple = FALSE)
+  })
+
+  # Parameter selector (multiple selection, shows units)
+  output$pollutant_param_selector <- renderUI({
+    req(pollutant_raw(), input$selected_site)
+    data <- pollutant_raw()
+    if (!("parameter" %in% names(data))) return(NULL)
+    site_data <- data[data$SiteName == input$selected_site, ]
+    params <- sort(unique(as.character(site_data$parameter)))
+    params <- params[!is.na(params) & params != ""]
+    param_labels <- sapply(params, function(p) {
+      units <- unique(site_data$units_of_measure[site_data$parameter == p])
+      units <- units[!is.na(units) & units != ""]
+      if (length(units) > 0) paste0(p, " (", paste(units, collapse = "/"), ")") else p
+    })
+    checkboxGroupInput("selected_params", "Select Parameter(s):",
+                        choices = setNames(params, param_labels))
+  })
+
+  # Date selector based on met data date range
+  output$pollutant_date_selector <- renderUI({
+    req(pollutant_raw(), input$selected_site, input$selected_params, processed_data())
+    poll_data <- pollutant_raw()
+    met_data <- processed_data()$hourly
+
+    met_dates <- as.POSIXct(met_data$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
+    met_min <- min(met_dates, na.rm = TRUE)
+    met_max <- max(met_dates, na.rm = TRUE)
+
+    site_data <- poll_data[poll_data$SiteName == input$selected_site &
+                            poll_data$parameter %in% input$selected_params, ]
+    site_data$parsed_date <- parse_datetime_string(
+      as.character(site_data$date_LT_shifted_to_selected_timezone))
+
+    site_data <- site_data[!is.na(site_data$parsed_date) &
+                            site_data$parsed_date >= met_min &
+                            site_data$parsed_date <= met_max, ]
+    site_data$sample_measurement <- as.numeric(site_data$sample_measurement)
+    site_data <- site_data[is.finite(site_data$sample_measurement), ]
+
+    if (nrow(site_data) == 0) {
+      return(p(em("No pollutant data with finite values in the met data date range.")))
+    }
+
+    avail_dates <- sort(unique(as.Date(site_data$parsed_date)))
+    date_choices <- setNames(as.character(avail_dates),
+                              format(avail_dates, "%b %d, %Y (%a)"))
+    checkboxGroupInput("selected_poll_dates", "Select Date(s):",
+                        choices = date_choices, selected = as.character(avail_dates))
+  })
+
+  # Process pollutant data, merge with met data, and generate plot
+  observeEvent(input$process_pollutant, {
+    req(pollutant_raw(), processed_data(),
+        input$selected_site, input$selected_params, input$selected_poll_dates)
+    tryCatch({
+      poll_data <- pollutant_raw()
+      met_hourly <- processed_data()$hourly
+      site_name <- input$selected_site
+      sel_params <- input$selected_params
+      sel_dates <- as.Date(input$selected_poll_dates)
+      met_site <- if (!is.null(input$met_data_site) && input$met_data_site != "") {
+        input$met_data_site
+      } else {
+        "MetSite"
+      }
+
+      # Filter pollutant data
+      poll_sub <- poll_data[poll_data$SiteName == site_name &
+                             poll_data$parameter %in% sel_params, ]
+      poll_sub$parsed_date <- parse_datetime_string(
+        as.character(poll_sub$date_LT_shifted_to_selected_timezone))
+      poll_sub <- poll_sub[!is.na(poll_sub$parsed_date) &
+                            as.Date(poll_sub$parsed_date) %in% sel_dates, ]
+      if (nrow(poll_sub) == 0) {
+        showNotification("No pollutant data after filtering.", type = "error")
+        return()
+      }
+
+      # Record units per parameter
+      param_units <- list()
+      for (p in sel_params) {
+        u <- unique(poll_sub$units_of_measure[poll_sub$parameter == p])
+        u <- u[!is.na(u) & u != ""]
+        param_units[[p]] <- if (length(u) > 0) u[1] else ""
+      }
+
+      poll_sub$sample_measurement <- as.numeric(poll_sub$sample_measurement)
+
+      # Reshape to wide format
+      reshape_df <- data.frame(
+        date = poll_sub$parsed_date,
+        SiteName = poll_sub$SiteName,
+        parameter = poll_sub$parameter,
+        sample_measurement = poll_sub$sample_measurement,
+        stringsAsFactors = FALSE
+      )
+      wide_poll <- reshape_df %>%
+        group_by(date, SiteName, parameter) %>%
+        summarise(sample_measurement = mean(sample_measurement, na.rm = TRUE),
+                  .groups = "drop") %>%
+        pivot_wider(names_from = parameter, values_from = sample_measurement) %>%
+        as.data.frame()
+
+      # Parse met dates and floor pollutant dates for merging
+      met_hourly$date <- as.POSIXct(met_hourly$DateTime,
+                                      format = "%Y-%m-%d %H:%M", tz = "")
+      wide_poll$date <- floor_date(wide_poll$date, unit = "hour")
+
+      # Merge
+      MLVB_mesowest2 <- merge(met_hourly, wide_poll, by = "date",
+                               all.x = FALSE, all.y = FALSE)
+      if (nrow(MLVB_mesowest2) == 0) {
+        showNotification("No matching dates between met and pollutant data.",
+                         type = "error")
+        return()
+      }
+
+      # Map wind columns
+      if ("Wind_Gust_mph" %in% names(MLVB_mesowest2))
+        MLVB_mesowest2$gust_mesowest <- MLVB_mesowest2$Wind_Gust_mph
+      if ("Wind_Speed_mph" %in% names(MLVB_mesowest2))
+        MLVB_mesowest2$ws_mesowest <- MLVB_mesowest2$Wind_Speed_mph
+
+      merged_result(MLVB_mesowest2)
+      MLVB_mesowest2 <- MLVB_mesowest2[order(MLVB_mesowest2$date), ]
+
+      # Event label for title
+      evt1 <- paste(format(min(MLVB_mesowest2$date), "%b %d"), "-",
+                    format(max(MLVB_mesowest2$date), "%b %d, %Y"))
+
+      # Plot filename
+      safe_site <- gsub("[^A-Za-z0-9_-]", "_", site_name)
+      safe_met <- gsub("[^A-Za-z0-9_-]", "_", met_site)
+      plot_filename <- paste0(safe_site, "_", safe_met, "_",
+                              paste(sel_params, collapse = "_"), ".png")
+      plot_path <- file.path(tempdir(), plot_filename)
+      n_rows <- nrow(MLVB_mesowest2)
+
+      # Find PM10 / PM2.5 columns
+      pm10_col <- NULL; pm25_col <- NULL
+      for (cn in names(MLVB_mesowest2)) {
+        if (grepl("^PM10$|^PM10_", cn) && is.null(pm10_col)) pm10_col <- cn
+        if (grepl("^PM2\\.5$|^PM2\\.5_", cn) && is.null(pm25_col)) pm25_col <- cn
+      }
+
+      if (!is.null(pm10_col)) {
+        MLVB_mesowest2$PM10_all <- as.numeric(MLVB_mesowest2[[pm10_col]])
+        MLVB_mesowest2$PM10_all[is.na(MLVB_mesowest2$PM10_all)] <- 0
+      }
+      if (!is.null(pm25_col)) {
+        MLVB_mesowest2$PM2.5_all <- as.numeric(MLVB_mesowest2[[pm25_col]])
+        MLVB_mesowest2$PM2.5_all[is.na(MLVB_mesowest2$PM2.5_all)] <- 0
+      }
+
+      if (is.null(MLVB_mesowest2$gust_mesowest))
+        MLVB_mesowest2$gust_mesowest <- NA_real_
+      if (is.null(MLVB_mesowest2$ws_mesowest))
+        MLVB_mesowest2$ws_mesowest <- NA_real_
+
+      # --- Generate the PNG ---
+      png(plot_path, width = 1980, height = 1200, pointsize = 24)
+      par(mar = c(8, 8, 3, 8), mgp = c(5, 2, 0))
+
+      if (!is.null(pm10_col)) {
+        # PM10 bar chart
+        txtCols <- rgb(0, 0, 0.8, alpha = 0.7)
+        concSpec <- "PM10"
+        y_max <- max(MLVB_mesowest2$PM10_all, na.rm = TRUE) * 1.5
+        if (!is.finite(y_max) || y_max == 0) y_max <- 1
+
+        barplot(MLVB_mesowest2$PM10_all ~ MLVB_mesowest2$date,
+                space = 0, border = FALSE, col = txtCols, xlab = "",
+                names.arg = rep("", n_rows),
+                ylab = expression(paste("PM, ", mu, "g/m"^3)),
+                main = paste(site_name, evt1),
+                cex.lab = 3, cex.axis = 3, xaxt = "n",
+                ylim = c(0, y_max), cex.main = 3, xlim = c(0, n_rows))
+        tick_seq <- seq(1, n_rows, by = max(1, floor(n_rows / 4)))
+        axis(1, at = tick_seq - 0.5,
+             labels = format(MLVB_mesowest2$date[tick_seq], "%b %d\n%I %p"),
+             cex.axis = 2, las = 2)
+
+        # Overlay PM2.5 if present
+        if (!is.null(pm25_col) &&
+            is.finite(mean(MLVB_mesowest2$PM2.5_all, na.rm = TRUE))) {
+          barplot(MLVB_mesowest2$PM2.5_all ~ MLVB_mesowest2$date,
+                  space = c(0.5, rep(1, n_rows - 1)),
+                  width = rep(0.5, n_rows), border = FALSE,
+                  col = rgb(0.5, 0.8, 1, alpha = 0.8),
+                  names.arg = rep("", n_rows),
+                  xlab = "", ylab = "", main = "", axes = FALSE, add = TRUE)
+          concSpec <- c(concSpec, "PM2.5")
+          txtCols <- c(txtCols, rgb(0.5, 0.8, 1, alpha = 0.8))
+        }
+      } else {
+        # Generic: first selected parameter as bars
+        first_param <- sel_params[1]
+        first_col <- NULL
+        for (cn in names(MLVB_mesowest2)) {
+          if (cn == first_param) { first_col <- cn; break }
+        }
+        if (is.null(first_col)) first_col <- first_param
+
+        prim_vals <- as.numeric(MLVB_mesowest2[[first_col]])
+        prim_vals[is.na(prim_vals)] <- 0
+        MLVB_mesowest2$primary_conc <- prim_vals
+
+        txtCols <- rgb(0, 0, 0.8, alpha = 0.7)
+        concSpec <- first_param
+        unit_label <- if (param_units[[first_param]] != "") {
+          paste0(first_param, ", ", param_units[[first_param]])
+        } else first_param
+
+        y_max <- max(prim_vals, na.rm = TRUE) * 1.5
+        if (!is.finite(y_max) || y_max == 0) y_max <- 1
+
+        barplot(MLVB_mesowest2$primary_conc ~ MLVB_mesowest2$date,
+                space = 0, border = FALSE, col = txtCols, xlab = "",
+                names.arg = rep("", n_rows), ylab = unit_label,
+                main = paste(site_name, evt1),
+                cex.lab = 3, cex.axis = 3, xaxt = "n",
+                ylim = c(0, y_max), cex.main = 3, xlim = c(0, n_rows))
+        tick_seq <- seq(1, n_rows, by = max(1, floor(n_rows / 4)))
+        axis(1, at = tick_seq - 0.5,
+             labels = format(MLVB_mesowest2$date[tick_seq], "%b %d\n%I %p"),
+             cex.axis = 2, las = 2)
+
+        # Second parameter overlay if present
+        if (length(sel_params) > 1) {
+          sec_param <- sel_params[2]
+          if (sec_param %in% names(MLVB_mesowest2)) {
+            sec_vals <- as.numeric(MLVB_mesowest2[[sec_param]])
+            sec_vals[is.na(sec_vals)] <- 0
+            if (is.finite(mean(sec_vals, na.rm = TRUE))) {
+              barplot(sec_vals ~ MLVB_mesowest2$date,
+                      space = c(0.5, rep(1, n_rows - 1)),
+                      width = rep(0.5, n_rows), border = FALSE,
+                      col = rgb(0.5, 0.8, 1, alpha = 0.8),
+                      names.arg = rep("", n_rows),
+                      xlab = "", ylab = "", main = "", axes = FALSE, add = TRUE)
+              concSpec <- c(concSpec, sec_param)
+              txtCols <- c(txtCols, rgb(0.5, 0.8, 1, alpha = 0.8))
+            }
+          }
+        }
+      }
+
+      # Overlay gust line
+      par(new = TRUE)
+      gust_max <- max(MLVB_mesowest2$gust_mesowest, na.rm = TRUE)
+      if (!is.finite(gust_max)) gust_max <- 1
+      plot((1:n_rows) - 0.5, MLVB_mesowest2$gust_mesowest,
+           type = "l", xlab = "", ylab = "", col = 6, axes = FALSE,
+           lwd = 3, ylim = c(0, gust_max * 1.1), xlim = c(0, n_rows))
+      axis(4, cex.axis = 2, col = 6, col.ticks = 6, col.axis = 6)
+
+      # Overlay average wind speed line
+      lines((1:n_rows) - 0.5, MLVB_mesowest2$ws_mesowest, col = 1, lwd = 3)
+
+      # Wind threshold
+      abline(h = 25, lty = 3, lwd = 3, col = 1)
+
+      # Legend
+      legend("topleft", ncol = 3,
+             fill = c(txtCols, NA, NA, NA),
+             lty = c(rep(NA, length(txtCols)), 1, 1, 3),
+             border = FALSE,
+             lwd = c(rep(NA, length(txtCols)), 3, 3, 3),
+             col = c(rep(NA, length(txtCols)), 6, 1, 1),
+             text.col = c(txtCols, 6, 1, 1),
+             legend = c(concSpec,
+                        paste0("1hr max gust @ ", met_site),
+                        paste("Avg wind @", met_site),
+                        "Wind threshold"),
+             box.lty = 0, cex = 2.5, bg = "transparent",
+             x.intersp = 0.6, seg.len = 0.6)
+
+      box()
+      mtext("Wind Speed (mph)", side = 4, line = 4, cex = 2.5, col = 1)
+      dev.off()
+
+      pollutant_plot_path(plot_path)
+      showNotification("Plot generated successfully!", type = "message")
+      updateTabsetPanel(session, "tabsetPanel", selected = "Pollutant Plot")
+
+    }, error = function(e) {
+      showNotification(paste("Error processing pollutant data:", e$message),
+                       type = "error", duration = 10)
+    })
+  })
+
+  # Render the pollutant plot as base64 image
+  output$pollutant_plot_ui <- renderUI({
+    req(pollutant_plot_path())
+    plot_path <- pollutant_plot_path()
+    if (!file.exists(plot_path)) return(NULL)
+    raw_data <- readBin(plot_path, "raw", file.info(plot_path)$size)
+    b64 <- base64encode(raw_data)
+    tags$img(src = paste0("data:image/png;base64,", b64),
+             style = "max-width:100%; height:auto;")
+  })
+
+  # Merged data preview table
+  output$merged_data_table <- renderDT({
+    req(merged_result())
+    datatable(merged_result(),
+              options = list(scrollX = TRUE, pageLength = 25),
+              caption = "Merged meteorological + pollutant data")
+  })
 }
 
 # Run the application
