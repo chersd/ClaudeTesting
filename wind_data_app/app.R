@@ -9,6 +9,7 @@ library(DT)
 library(readxl)
 library(tidyr)
 library(base64enc)
+library(shinyBS)
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -667,6 +668,19 @@ ui <- fluidPage(
 
       hr(),
 
+      # Meteorological data timestamp convention
+      radioButtons("met_timestamp_convention",
+                   tags$span("Are meteorological data timestamps at start or end of the hour?",
+                             icon("info-circle", id = "met_ts_info")),
+                   choices = list("Start" = "start", "End" = "end"),
+                   selected = "end",
+                   inline = TRUE),
+      bsTooltip("met_ts_info",
+                "Air quality agencies usually timestamp data at the START of the hour while meteorological data sources usually timestamp data at the END of the hour.",
+                placement = "right", trigger = "hover"),
+
+      hr(),
+
       # Long format configuration
       h4("Data Format"),
       checkboxInput("is_long_format", "Long format (parameters in rows)", value = FALSE),
@@ -1275,6 +1289,13 @@ server <- function(input, output, session) {
         showNotification("No valid data rows remaining after date parsing. Please check if this is the correct file.",
                          type = "error")
         return()
+      }
+
+      # Adjust meteorological timestamps if convention is "end of hour"
+      # End-of-hour timestamps need to be shifted back by 1 hour so that
+      # the observation is associated with the correct hour window.
+      if (!is.null(input$met_timestamp_convention) && input$met_timestamp_convention == "end") {
+        data$parsed_datetime <- data$parsed_datetime - hours(1)
       }
 
       # Perform hourly averaging
