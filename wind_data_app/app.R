@@ -209,7 +209,7 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
 }
 
 #' Parse datetime strings in various formats
-parse_datetime_string <- function(datetime_str) {
+parse_datetime_string <- function(datetime_str, adjust_dst = TRUE) {
   datetime_str <- trimws(datetime_str)
   n <- length(datetime_str)
   result <- rep(as.POSIXct(NA), n)
@@ -335,7 +335,8 @@ parse_datetime_string <- function(datetime_str) {
 
   # Apply daylight saving adjustment: subtract 1 hour for daylight time zones
   # This converts daylight time to standard time
-  if (any(needs_dst_adjustment & !is.na(result))) {
+  # Skipped when adjust_dst = FALSE (e.g. pollutant data already in local time)
+  if (adjust_dst && any(needs_dst_adjustment & !is.na(result))) {
     result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
   }
 
@@ -1430,8 +1431,14 @@ server <- function(input, output, session) {
                                            "date_lt", "date"))
       if (length(date_idx) > 0) names(data)[date_idx[1]] <- "date_LT_shifted_to_selected_timezone"
 
-      site_idx <- which(col_lower %in% c("sitename", "site_name", "site"))
-      if (length(site_idx) > 0) names(data)[site_idx[1]] <- "SiteName"
+      # Prefer SiteName_nopoc if available; fall back to SiteName / site_name / site
+      nopoc_idx <- which(col_lower %in% c("sitename_nopoc"))
+      if (length(nopoc_idx) > 0) {
+        names(data)[nopoc_idx[1]] <- "SiteName"
+      } else {
+        site_idx <- which(col_lower %in% c("sitename", "site_name", "site"))
+        if (length(site_idx) > 0) names(data)[site_idx[1]] <- "SiteName"
+      }
 
       pollutant_raw(data)
       showNotification(sprintf("Pollutant file loaded: %d rows, %d columns",
@@ -1482,7 +1489,8 @@ server <- function(input, output, session) {
     site_data <- poll_data[poll_data$SiteName == input$selected_site &
                             poll_data$parameter %in% input$selected_params, ]
     site_data$parsed_date <- parse_datetime_string(
-      as.character(site_data$date_LT_shifted_to_selected_timezone))
+      as.character(site_data$date_LT_shifted_to_selected_timezone),
+      adjust_dst = FALSE)
 
     site_data <- site_data[!is.na(site_data$parsed_date) &
                             site_data$parsed_date >= met_min &
@@ -1512,7 +1520,8 @@ server <- function(input, output, session) {
 
     sub <- poll_data[poll_data$parameter %in% sel_params, ]
     sub$parsed_date <- parse_datetime_string(
-      as.character(sub$date_LT_shifted_to_selected_timezone))
+      as.character(sub$date_LT_shifted_to_selected_timezone),
+      adjust_dst = FALSE)
     sub <- sub[!is.na(sub$parsed_date) &
                as.Date(sub$parsed_date) %in% sel_dates, ]
     sub$sample_measurement <- as.numeric(sub$sample_measurement)
@@ -1543,7 +1552,8 @@ server <- function(input, output, session) {
       poll_sub <- poll_data[poll_data$SiteName == site_name &
                              poll_data$parameter %in% sel_params, ]
       poll_sub$parsed_date <- parse_datetime_string(
-        as.character(poll_sub$date_LT_shifted_to_selected_timezone))
+        as.character(poll_sub$date_LT_shifted_to_selected_timezone),
+        adjust_dst = FALSE)
       poll_sub <- poll_sub[!is.na(poll_sub$parsed_date) &
                             as.Date(poll_sub$parsed_date) %in% sel_dates, ]
       if (nrow(poll_sub) == 0) {
@@ -1768,7 +1778,19 @@ server <- function(input, output, session) {
       ws_label <- paste0("Avg wind @ ", met_site)
       leg_labels <- c(concSpec, gust_label, ws_label, "Wind threshold")
 
-      legend("topleft", ncol = 3,
+      # Dynamically choose number of legend columns based on label widths
+      # to avoid overflow when site names or labels are long
+      max_label_chars <- max(nchar(leg_labels))
+      n_items <- length(leg_labels)
+      leg_ncol <- if (max_label_chars > 30 || n_items > 6) {
+        1
+      } else if (max_label_chars > 18 || n_items > 4) {
+        2
+      } else {
+        3
+      }
+
+      legend("topleft", ncol = leg_ncol,
              fill = leg_fill, lty = leg_lty, border = FALSE,
              lwd = leg_lwd, col = leg_col, text.col = leg_txtcol,
              legend = leg_labels,
