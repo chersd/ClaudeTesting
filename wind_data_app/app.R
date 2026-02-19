@@ -1501,13 +1501,14 @@ server <- function(input, output, session) {
                         choices = date_choices, selected = as.character(avail_dates))
   })
 
-  # Process pollutant data, merge with met data, and generate plot
+  # Process pollutant data and generate plot with wind overlay
   observeEvent(input$process_pollutant, {
     req(pollutant_raw(), processed_data(),
         input$selected_site, input$selected_params, input$selected_poll_dates)
     tryCatch({
       poll_data <- pollutant_raw()
       met_hourly <- processed_data()$hourly
+      met_subhourly <- processed_data()$subhourly
       site_name <- input$selected_site
       sel_params <- input$selected_params
       sel_dates <- as.Date(input$selected_poll_dates)
@@ -1539,47 +1540,86 @@ server <- function(input, output, session) {
 
       poll_sub$sample_measurement <- as.numeric(poll_sub$sample_measurement)
 
-      # Reshape to wide format
+      # Reshape pollutant to wide format (one row per hour)
       reshape_df <- data.frame(
         date = poll_sub$parsed_date,
-        SiteName = poll_sub$SiteName,
         parameter = poll_sub$parameter,
         sample_measurement = poll_sub$sample_measurement,
         stringsAsFactors = FALSE
       )
+      reshape_df$date_hour <- floor_date(reshape_df$date, unit = "hour")
       wide_poll <- reshape_df %>%
-        group_by(date, SiteName, parameter) %>%
+        group_by(date_hour, parameter) %>%
         summarise(sample_measurement = mean(sample_measurement, na.rm = TRUE),
                   .groups = "drop") %>%
         pivot_wider(names_from = parameter, values_from = sample_measurement) %>%
         as.data.frame()
 
-      # Parse met dates and floor pollutant dates for merging
-      met_hourly$date <- as.POSIXct(met_hourly$DateTime,
-                                      format = "%Y-%m-%d %H:%M", tz = "")
-      wide_poll$date <- floor_date(wide_poll$date, unit = "hour")
+      # Build complete hourly time grid spanning selected dates
+      date_min <- min(wide_poll$date_hour, na.rm = TRUE)
+      date_max <- max(wide_poll$date_hour, na.rm = TRUE)
+      all_hours <- seq(from = date_min, to = date_max, by = "hour")
+      time_grid <- data.frame(date_hour = all_hours, stringsAsFactors = FALSE)
 
-      # Merge
-      MLVB_mesowest2 <- merge(met_hourly, wide_poll, by = "date",
-                               all.x = FALSE, all.y = FALSE)
-      if (nrow(MLVB_mesowest2) == 0) {
-        showNotification("No matching dates between met and pollutant data.",
-                         type = "error")
+      # Left-join pollutant data onto grid (gaps remain NA)
+      poll_grid <- merge(time_grid, wide_poll, by = "date_hour", all.x = TRUE)
+      poll_grid <- poll_grid[order(poll_grid$date_hour), ]
+      n_hours <- nrow(poll_grid)
+
+      if (n_hours == 0) {
+        showNotification("No data to plot.", type = "error")
         return()
       }
 
-      # Map wind columns
-      if ("Wind_Gust_mph" %in% names(MLVB_mesowest2))
-        MLVB_mesowest2$gust_mesowest <- MLVB_mesowest2$Wind_Gust_mph
-      if ("Wind_Speed_mph" %in% names(MLVB_mesowest2))
-        MLVB_mesowest2$ws_mesowest <- MLVB_mesowest2$Wind_Speed_mph
+      # Prepare wind data: prefer sub-hourly, fall back to hourly
+      # Parse wind datetimes
+      wind_df <- NULL
+      wind_label_prefix <- ""
 
-      merged_result(MLVB_mesowest2)
-      MLVB_mesowest2 <- MLVB_mesowest2[order(MLVB_mesowest2$date), ]
+      if (!is.null(met_subhourly) && nrow(met_subhourly) > 0) {
+        sh <- met_subhourly
+        sh$date <- as.POSIXct(sh$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
+        sh <- sh[sh$date >= date_min & sh$date <= (date_max + 3600), ]
+        if (nrow(sh) > 0) {
+          wind_df <- data.frame(date = sh$date, stringsAsFactors = FALSE)
+          if ("Wind_Gust_mph" %in% names(sh))
+            wind_df$gust <- as.numeric(sh$Wind_Gust_mph)
+          if ("Wind_Speed_mph" %in% names(sh))
+            wind_df$ws <- as.numeric(sh$Wind_Speed_mph)
+          wind_df <- wind_df[order(wind_df$date), ]
+          wind_label_prefix <- "Sub-hourly "
+        }
+      }
+
+      # Fall back to hourly if sub-hourly not available or empty
+      if (is.null(wind_df) || nrow(wind_df) == 0) {
+        hr <- met_hourly
+        hr$date <- as.POSIXct(hr$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
+        hr <- hr[hr$date >= date_min & hr$date <= (date_max + 3600), ]
+        if (nrow(hr) > 0) {
+          wind_df <- data.frame(date = hr$date, stringsAsFactors = FALSE)
+          if ("Wind_Gust_mph" %in% names(hr))
+            wind_df$gust <- as.numeric(hr$Wind_Gust_mph)
+          if ("Wind_Speed_mph" %in% names(hr))
+            wind_df$ws <- as.numeric(hr$Wind_Speed_mph)
+          wind_df <- wind_df[order(wind_df$date), ]
+          wind_label_prefix <- ""
+        }
+      }
+
+      # Compute fractional positions for wind data on the hourly grid
+      # Each hour bar occupies [i-1, i) on the x-axis (0-indexed from left)
+      # Wind points map: x = (date - date_min) / 3600
+      if (!is.null(wind_df) && nrow(wind_df) > 0) {
+        wind_df$x <- as.numeric(difftime(wind_df$date, date_min, units = "hours"))
+      }
+
+      # Store for preview table
+      merged_result(poll_grid)
 
       # Event label for title
-      evt1 <- paste(format(min(MLVB_mesowest2$date), "%b %d"), "-",
-                    format(max(MLVB_mesowest2$date), "%b %d, %Y"))
+      evt1 <- paste(format(date_min, "%b %d"), "-",
+                    format(date_max, "%b %d, %Y"))
 
       # Plot filename
       safe_site <- gsub("[^A-Za-z0-9_-]", "_", site_name)
@@ -1587,144 +1627,132 @@ server <- function(input, output, session) {
       plot_filename <- paste0(safe_site, "_", safe_met, "_",
                               paste(sel_params, collapse = "_"), ".png")
       plot_path <- file.path(tempdir(), plot_filename)
-      n_rows <- nrow(MLVB_mesowest2)
 
-      # Find PM10 / PM2.5 columns
+      # Identify PM10 / PM2.5 columns in the wide pollutant grid
       pm10_col <- NULL; pm25_col <- NULL
-      for (cn in names(MLVB_mesowest2)) {
-        if (grepl("^PM10$|^PM10_", cn) && is.null(pm10_col)) pm10_col <- cn
-        if (grepl("^PM2\\.5$|^PM2\\.5_", cn) && is.null(pm25_col)) pm25_col <- cn
+      for (cn in names(poll_grid)) {
+        if (grepl("^PM10$|^PM10 ", cn, ignore.case = TRUE) && is.null(pm10_col))
+          pm10_col <- cn
+        if (grepl("^PM2\\.5$|^PM2\\.5 ", cn, ignore.case = TRUE) && is.null(pm25_col))
+          pm25_col <- cn
       }
 
+      # Build bar values vectors (NA stays NA for gaps)
       if (!is.null(pm10_col)) {
-        MLVB_mesowest2$PM10_all <- as.numeric(MLVB_mesowest2[[pm10_col]])
-        MLVB_mesowest2$PM10_all[is.na(MLVB_mesowest2$PM10_all)] <- 0
-      }
-      if (!is.null(pm25_col)) {
-        MLVB_mesowest2$PM2.5_all <- as.numeric(MLVB_mesowest2[[pm25_col]])
-        MLVB_mesowest2$PM2.5_all[is.na(MLVB_mesowest2$PM2.5_all)] <- 0
+        bar_primary <- as.numeric(poll_grid[[pm10_col]])
+      } else {
+        bar_primary <- as.numeric(poll_grid[[sel_params[1]]])
       }
 
-      if (is.null(MLVB_mesowest2$gust_mesowest))
-        MLVB_mesowest2$gust_mesowest <- NA_real_
-      if (is.null(MLVB_mesowest2$ws_mesowest))
-        MLVB_mesowest2$ws_mesowest <- NA_real_
+      bar_secondary <- NULL
+      if (!is.null(pm10_col) && !is.null(pm25_col)) {
+        bar_secondary <- as.numeric(poll_grid[[pm25_col]])
+      } else if (is.null(pm10_col) && length(sel_params) > 1 &&
+                 sel_params[2] %in% names(poll_grid)) {
+        bar_secondary <- as.numeric(poll_grid[[sel_params[2]]])
+      }
+
+      # Determine labels and colors
+      if (!is.null(pm10_col)) {
+        concSpec <- "PM10"
+        txtCols <- rgb(0, 0, 0.8, alpha = 0.7)
+        y_label <- expression(paste("PM, ", mu, "g/m"^3))
+      } else {
+        concSpec <- sel_params[1]
+        txtCols <- rgb(0, 0, 0.8, alpha = 0.7)
+        y_label <- if (param_units[[sel_params[1]]] != "") {
+          paste0(sel_params[1], ", ", param_units[[sel_params[1]]])
+        } else sel_params[1]
+      }
+
+      if (!is.null(bar_secondary)) {
+        sec_name <- if (!is.null(pm25_col)) "PM2.5" else sel_params[2]
+        concSpec <- c(concSpec, sec_name)
+        txtCols <- c(txtCols, rgb(0.5, 0.8, 1, alpha = 0.8))
+      }
+
+      # Y-axis max for bars
+      all_bar_vals <- c(bar_primary, bar_secondary)
+      y_max <- max(all_bar_vals, na.rm = TRUE) * 1.5
+      if (!is.finite(y_max) || y_max == 0) y_max <- 1
+
+      # Wind y-axis max
+      wind_max <- 1
+      if (!is.null(wind_df) && nrow(wind_df) > 0) {
+        gust_vals <- if ("gust" %in% names(wind_df)) wind_df$gust else NA
+        ws_vals <- if ("ws" %in% names(wind_df)) wind_df$ws else NA
+        wind_max <- max(c(gust_vals, ws_vals), na.rm = TRUE)
+        if (!is.finite(wind_max) || wind_max == 0) wind_max <- 1
+      }
 
       # --- Generate the PNG ---
       png(plot_path, width = 1980, height = 1200, pointsize = 24)
       par(mar = c(8, 8, 3, 8), mgp = c(5, 2, 0))
 
-      if (!is.null(pm10_col)) {
-        # PM10 bar chart
-        txtCols <- rgb(0, 0, 0.8, alpha = 0.7)
-        concSpec <- "PM10"
-        y_max <- max(MLVB_mesowest2$PM10_all, na.rm = TRUE) * 1.5
-        if (!is.finite(y_max) || y_max == 0) y_max <- 1
+      # Replace NA with 0 for barplot (barplot can't handle NA heights),
+      # but track which are true gaps
+      bar_primary_plot <- ifelse(is.na(bar_primary), 0, bar_primary)
 
-        barplot(MLVB_mesowest2$PM10_all ~ MLVB_mesowest2$date,
-                space = 0, border = FALSE, col = txtCols, xlab = "",
-                names.arg = rep("", n_rows),
-                ylab = expression(paste("PM, ", mu, "g/m"^3)),
-                main = paste(site_name, evt1),
-                cex.lab = 3, cex.axis = 3, xaxt = "n",
-                ylim = c(0, y_max), cex.main = 3, xlim = c(0, n_rows))
-        tick_seq <- seq(1, n_rows, by = max(1, floor(n_rows / 4)))
-        axis(1, at = tick_seq - 0.5,
-             labels = format(MLVB_mesowest2$date[tick_seq], "%b %d\n%I %p"),
-             cex.axis = 2, las = 2)
+      # Use numeric barplot: bars at positions 0.5, 1.5, ..., n-0.5
+      bp <- barplot(bar_primary_plot, space = 0, border = FALSE,
+                    col = ifelse(is.na(bar_primary), "transparent", txtCols[1]),
+                    xlab = "", ylab = y_label,
+                    main = paste(site_name, evt1),
+                    cex.lab = 3, cex.axis = 3, xaxt = "n",
+                    ylim = c(0, y_max), cex.main = 3,
+                    xlim = c(0, n_hours))
 
-        # Overlay PM2.5 if present
-        if (!is.null(pm25_col) &&
-            is.finite(mean(MLVB_mesowest2$PM2.5_all, na.rm = TRUE))) {
-          barplot(MLVB_mesowest2$PM2.5_all ~ MLVB_mesowest2$date,
-                  space = c(0.5, rep(1, n_rows - 1)),
-                  width = rep(0.5, n_rows), border = FALSE,
-                  col = rgb(0.5, 0.8, 1, alpha = 0.8),
-                  names.arg = rep("", n_rows),
-                  xlab = "", ylab = "", main = "", axes = FALSE, add = TRUE)
-          concSpec <- c(concSpec, "PM2.5")
-          txtCols <- c(txtCols, rgb(0.5, 0.8, 1, alpha = 0.8))
+      # X-axis tick labels at regular intervals
+      tick_seq <- seq(1, n_hours, by = max(1, floor(n_hours / 6)))
+      axis(1, at = tick_seq - 0.5,
+           labels = format(poll_grid$date_hour[tick_seq], "%b %d\n%I %p"),
+           cex.axis = 2, las = 2)
+
+      # Overlay secondary bars if present
+      if (!is.null(bar_secondary)) {
+        bar_sec_plot <- ifelse(is.na(bar_secondary), 0, bar_secondary)
+        barplot(bar_sec_plot, space = c(0.5, rep(1, n_hours - 1)),
+                width = rep(0.5, n_hours), border = FALSE,
+                col = ifelse(is.na(bar_secondary), "transparent", txtCols[2]),
+                names.arg = rep("", n_hours),
+                xlab = "", ylab = "", main = "", axes = FALSE, add = TRUE)
+      }
+
+      # Overlay wind data as lines on right axis
+      par(new = TRUE)
+      plot(NULL, xlim = c(0, n_hours), ylim = c(0, wind_max * 1.1),
+           xlab = "", ylab = "", axes = FALSE, type = "n")
+
+      if (!is.null(wind_df) && nrow(wind_df) > 0) {
+        # Plot gust line with gaps (NA produces gaps in type="l")
+        if ("gust" %in% names(wind_df)) {
+          lines(wind_df$x, wind_df$gust, col = 6, lwd = 3, type = "l")
         }
-      } else {
-        # Generic: first selected parameter as bars
-        first_param <- sel_params[1]
-        first_col <- NULL
-        for (cn in names(MLVB_mesowest2)) {
-          if (cn == first_param) { first_col <- cn; break }
-        }
-        if (is.null(first_col)) first_col <- first_param
-
-        prim_vals <- as.numeric(MLVB_mesowest2[[first_col]])
-        prim_vals[is.na(prim_vals)] <- 0
-        MLVB_mesowest2$primary_conc <- prim_vals
-
-        txtCols <- rgb(0, 0, 0.8, alpha = 0.7)
-        concSpec <- first_param
-        unit_label <- if (param_units[[first_param]] != "") {
-          paste0(first_param, ", ", param_units[[first_param]])
-        } else first_param
-
-        y_max <- max(prim_vals, na.rm = TRUE) * 1.5
-        if (!is.finite(y_max) || y_max == 0) y_max <- 1
-
-        barplot(MLVB_mesowest2$primary_conc ~ MLVB_mesowest2$date,
-                space = 0, border = FALSE, col = txtCols, xlab = "",
-                names.arg = rep("", n_rows), ylab = unit_label,
-                main = paste(site_name, evt1),
-                cex.lab = 3, cex.axis = 3, xaxt = "n",
-                ylim = c(0, y_max), cex.main = 3, xlim = c(0, n_rows))
-        tick_seq <- seq(1, n_rows, by = max(1, floor(n_rows / 4)))
-        axis(1, at = tick_seq - 0.5,
-             labels = format(MLVB_mesowest2$date[tick_seq], "%b %d\n%I %p"),
-             cex.axis = 2, las = 2)
-
-        # Second parameter overlay if present
-        if (length(sel_params) > 1) {
-          sec_param <- sel_params[2]
-          if (sec_param %in% names(MLVB_mesowest2)) {
-            sec_vals <- as.numeric(MLVB_mesowest2[[sec_param]])
-            sec_vals[is.na(sec_vals)] <- 0
-            if (is.finite(mean(sec_vals, na.rm = TRUE))) {
-              barplot(sec_vals ~ MLVB_mesowest2$date,
-                      space = c(0.5, rep(1, n_rows - 1)),
-                      width = rep(0.5, n_rows), border = FALSE,
-                      col = rgb(0.5, 0.8, 1, alpha = 0.8),
-                      names.arg = rep("", n_rows),
-                      xlab = "", ylab = "", main = "", axes = FALSE, add = TRUE)
-              concSpec <- c(concSpec, sec_param)
-              txtCols <- c(txtCols, rgb(0.5, 0.8, 1, alpha = 0.8))
-            }
-          }
+        # Plot avg wind speed line with gaps
+        if ("ws" %in% names(wind_df)) {
+          lines(wind_df$x, wind_df$ws, col = 1, lwd = 3, type = "l")
         }
       }
 
-      # Overlay gust line
-      par(new = TRUE)
-      gust_max <- max(MLVB_mesowest2$gust_mesowest, na.rm = TRUE)
-      if (!is.finite(gust_max)) gust_max <- 1
-      plot((1:n_rows) - 0.5, MLVB_mesowest2$gust_mesowest,
-           type = "l", xlab = "", ylab = "", col = 6, axes = FALSE,
-           lwd = 3, ylim = c(0, gust_max * 1.1), xlim = c(0, n_rows))
       axis(4, cex.axis = 2, col = 6, col.ticks = 6, col.axis = 6)
-
-      # Overlay average wind speed line
-      lines((1:n_rows) - 0.5, MLVB_mesowest2$ws_mesowest, col = 1, lwd = 3)
 
       # Wind threshold
       abline(h = 25, lty = 3, lwd = 3, col = 1)
 
-      # Legend
+      # Build legend
+      leg_fill <- c(txtCols, NA, NA, NA)
+      leg_lty <- c(rep(NA, length(txtCols)), 1, 1, 3)
+      leg_lwd <- c(rep(NA, length(txtCols)), 3, 3, 3)
+      leg_col <- c(rep(NA, length(txtCols)), 6, 1, 1)
+      leg_txtcol <- c(txtCols, 6, 1, 1)
+      gust_label <- paste0(wind_label_prefix, "1hr max gust @ ", met_site)
+      ws_label <- paste0(wind_label_prefix, "Avg wind @ ", met_site)
+      leg_labels <- c(concSpec, gust_label, ws_label, "Wind threshold")
+
       legend("topleft", ncol = 3,
-             fill = c(txtCols, NA, NA, NA),
-             lty = c(rep(NA, length(txtCols)), 1, 1, 3),
-             border = FALSE,
-             lwd = c(rep(NA, length(txtCols)), 3, 3, 3),
-             col = c(rep(NA, length(txtCols)), 6, 1, 1),
-             text.col = c(txtCols, 6, 1, 1),
-             legend = c(concSpec,
-                        paste0("1hr max gust @ ", met_site),
-                        paste("Avg wind @", met_site),
-                        "Wind threshold"),
+             fill = leg_fill, lty = leg_lty, border = FALSE,
+             lwd = leg_lwd, col = leg_col, text.col = leg_txtcol,
+             legend = leg_labels,
              box.lty = 0, cex = 2.5, bg = "transparent",
              x.intersp = 0.6, seg.len = 0.6)
 
