@@ -698,13 +698,27 @@ ui <- fluidPage(
 
       hr(),
 
-      downloadButton("download", "Download Results")
+      downloadButton("download", "Download Results"),
+
+      hr(),
+
+      # ---- Pollutant Data Overlay ----
+      h3("Pollutant Data Overlay"),
+      fileInput("pollutant_file", "Upload Pollutant Data (CSV)",
+                accept = c(".csv", "text/csv")),
+
+      uiOutput("site_name_selector"),
+      uiOutput("pollutant_param_selector"),
+      uiOutput("pollutant_date_selector"),
+
+      actionButton("process_pollutant", "Generate Pollutant Plot",
+                    class = "btn-success btn-lg")
     ),
 
     mainPanel(
       width = 8,
 
-      tabsetPanel(
+      tabsetPanel(id = "tabsetPanel",
         tabPanel("Preview",
                  h4("Uploaded Data Preview"),
                  DTOutput("preview_table"),
@@ -719,6 +733,16 @@ ui <- fluidPage(
                  hr(),
                  h4("Summary Statistics"),
                  verbatimTextOutput("summary_stats")
+        ),
+
+        tabPanel("Pollutant Plot",
+                 h4("Pollutant Concentration with Wind Overlay"),
+                 uiOutput("pollutant_plot_ui")
+        ),
+
+        tabPanel("Pollutant Data",
+                 h4("Merged Meteorological + Pollutant Data"),
+                 DTOutput("merged_data_table")
         ),
 
         tabPanel("Help",
@@ -795,6 +819,7 @@ server <- function(input, output, session) {
     tryCatch({
       data <- read_data_file(input$file$datapath, file_ext)
       uploaded_data(data)
+      working_data(data)  # Always sync working_data on new upload
 
       col_names <- names(data)
       col_choices <- setNames(col_names, col_names)
@@ -920,11 +945,11 @@ server <- function(input, output, session) {
   # Reactive for working data (original or reshaped from long format)
   working_data <- reactiveVal(NULL)
 
-  # Keep working_data in sync with uploaded_data for wide format
+  # Keep working_data in sync with uploaded_data on every new upload.
+  # The "Apply & Reshape" handler will override working_data() when the
+  # user explicitly reshapes long-format data.
   observeEvent(uploaded_data(), {
-    if (!input$is_long_format) {
-      working_data(uploaded_data())
-    }
+    working_data(uploaded_data())
   })
 
   # Dynamic QC flag selector based on selected QC column
