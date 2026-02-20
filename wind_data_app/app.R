@@ -89,11 +89,9 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
                             as.numeric(day_vals),
                             as.numeric(hour_vals),
                             as.numeric(minute_vals))
-<<<<<<< claude/air-quality-data-comparison-39kax
+
     return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "Etc/GMT"))
-=======
     return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "PST8"))
->>>>>>> local
   }
 
   # Case 2: Single datetime column or date + time columns
@@ -111,17 +109,15 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
 }
 
 #' Parse datetime strings in various formats
-<<<<<<< claude/air-quality-data-comparison-39kax
+
 parse_datetime_string <- function(datetime_str) {
-=======
+
 parse_datetime_string <- function(datetime_str, adjust_dst) {
->>>>>>> local
+
   datetime_str <- trimws(datetime_str)
   n <- length(datetime_str)
   result <- rep(as.POSIXct(NA), n)
 
-<<<<<<< claude/air-quality-data-comparison-39kax
-=======
   # Detect and handle timezone abbreviations
   # Daylight time zones need -1 hour adjustment to convert to standard time
   daylight_tz_pattern <- "-0.0{0,2}$|\\s+(PDT|EDT|CDT|MDT|ADT|AKDT|-0.0{0,2})$"
@@ -135,7 +131,6 @@ parse_datetime_string <- function(datetime_str, adjust_dst) {
   datetime_str <- gsub(standard_tz_pattern, "", datetime_str, ignore.case = TRUE)
   datetime_str <- trimws(datetime_str)
 
->>>>>>> local
   # Try each format pattern
   formats_to_try <- list(
     # ISO 8601 formats
@@ -197,11 +192,9 @@ browser("280")
                        "%Y-%m-%d %I:%M:%S %p", "%Y/%m/%d %I:%M:%S %p",
                        "%Y-%m-%d %I:%M %p", "%Y/%m/%d %I:%M %p")
     for (fmt in am_pm_formats) {
-<<<<<<< claude/air-quality-data-comparison-39kax
+
       parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "Etc/GMT")
-=======
       parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "PST8")
->>>>>>> local
       if (sum(!is.na(parsed)) > sum(!is.na(result[am_pm_idx]))) {
         result[am_pm_idx] <- parsed
       }
@@ -220,11 +213,9 @@ browser("300")
         numeric_idx <- grepl("^\\d{9,10}$", remaining_str)
         if (any(numeric_idx)) {
           posix_vals <- as.numeric(remaining_str[numeric_idx])
-<<<<<<< claude/air-quality-data-comparison-39kax
+
           parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "Etc/GMT")
-=======
           parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "PST8")
->>>>>>> local
           temp_result <- result[remaining_idx]
           temp_result[numeric_idx] <- parsed_posix
           result[remaining_idx] <- temp_result
@@ -239,11 +230,8 @@ browser("300")
             temp_str <- gsub("Z$", "", temp_str)
             # Remove timezone offset
             temp_str <- gsub("[+-]\\d{2}:\\d{2}$", "", temp_str)
-<<<<<<< claude/air-quality-data-comparison-39kax
             parsed <- as.POSIXct(temp_str, format = fmt, tz = "Etc/GMT")
-=======
             parsed <- as.POSIXct(temp_str, format = fmt, tz = "PST8")
->>>>>>> local
 
             temp_result <- result[remaining_idx]
             temp_still_na <- is.na(temp_result)
@@ -259,8 +247,6 @@ browser("300")
 
   }
 
-<<<<<<< claude/air-quality-data-comparison-39kax
-=======
   # Apply daylight saving adjustment: subtract 1 hour for daylight time zones
   # This converts daylight time to standard time
   # Skipped when adjust_dst = FALSE (e.g. pollutant data already in local time)
@@ -289,7 +275,7 @@ browser("300")
     }
   }
 
->>>>>>> local
+
   return(result)
 }
 
@@ -419,11 +405,11 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
   # Ensure datetime is POSIXct
   data$datetime <- data[[datetime_col]]
   if (!inherits(data$datetime, "POSIXct")) {
-<<<<<<< claude/air-quality-data-comparison-39kax
+# # # < claude/air-quality-data-comparison-39kax
     data$datetime <- as.POSIXct(data$datetime, tz = "Etc/GMT")
-=======
+# ===
     data$datetime <- as.POSIXct(data$datetime, tz = "PST8")
->>>>>>> local
+# # # > local
   }
 
   # Create hour floor for grouping
@@ -497,8 +483,8 @@ ui <- fluidPage(
                            "application/vnd.ms-excel",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
 
-<<<<<<< claude/air-quality-data-comparison-39kax
-=======
+# # # < claude/air-quality-data-comparison-39kax
+# ===
       # Meteorological site name
       textInput("met_data_site", "Meteorological Site Name:",
                 placeholder = "e.g., KVNY, KLAX"),
@@ -544,7 +530,7 @@ ui <- fluidPage(
         )
       ),
 
->>>>>>> local
+# # # > local
       hr(),
 
       # Date/Time configuration
@@ -927,8 +913,8 @@ server <- function(input, output, session) {
       write.csv(processed_data(), file, row.names = FALSE)
     }
   )
-<<<<<<< claude/air-quality-data-comparison-39kax
-=======
+# # # < claude/air-quality-data-comparison-39kax
+# ===
 
   # Download handler - sub-hourly data
   output$download_subhourly <- downloadHandler(
@@ -1392,7 +1378,7 @@ server <- function(input, output, session) {
               options = list(scrollX = TRUE, pageLength = 25),
               caption = "Merged meteorological + pollutant data")
   })
->>>>>>> local
+# # # > local
 }
 
 # Run the application
