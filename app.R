@@ -43,26 +43,130 @@ detect_delimiter <- function(file_path, n_lines = 10) {
   return(delimiters[best_idx])
 }
 
+#' Remove comment lines from a file and return clean temp file path
+remove_comments <- function(file_path) {
+  lines <- readLines(file_path, warn = FALSE)
+
+  # Remove lines starting with comment characters (after trimming whitespace)
+  comment_patterns <- c("^\\s*#", "^\\s*\\*", "^\\s*//", "^\\s*;\\s*[^0-9]")
+
+  clean_lines <- lines
+  for (pattern in comment_patterns) {
+    clean_lines <- clean_lines[!grepl(pattern, clean_lines)]
+  }
+
+  # Remove empty lines at start and end
+  while (length(clean_lines) > 0 && trimws(clean_lines[1]) == "") {
+    clean_lines <- clean_lines[-1]
+  }
+  while (length(clean_lines) > 0 && trimws(clean_lines[length(clean_lines)]) == "") {
+    clean_lines <- clean_lines[-length(clean_lines)]
+  }
+
+  # Write to temp file
+  temp_file <- tempfile(fileext = ".txt")
+  writeLines(clean_lines, temp_file)
+  return(temp_file)
+}
+
 #' Read data file (CSV, Excel, or delimited text)
 read_data_file <- function(file_path, file_ext) {
   file_ext <- tolower(file_ext)
 
   if (file_ext %in% c("xls", "xlsx")) {
-    # Read Excel file
+    # Read Excel file (comments handled differently - skip rows starting with #)
     data <- read_excel(file_path, na = c("", "NA", "N/A", "null", "-"))
     data <- as.data.frame(data, stringsAsFactors = FALSE)
+    # Remove any rows where first column starts with comment char
+    if (nrow(data) > 0 && ncol(data) > 0) {
+      first_col <- as.character(data[[1]])
+      comment_rows <- grepl("^\\s*[#*]", first_col)
+      data <- data[!comment_rows, , drop = FALSE]
+    }
   } else if (file_ext == "csv") {
-    # Read CSV file
-    data <- read.csv(file_path, stringsAsFactors = FALSE,
-                     check.names = FALSE, na.strings = c("", "NA", "N/A", "null", "-"))
+    # Remove comments first, then read CSV
+    clean_file <- remove_comments(file_path)
+    data <- read.csv(clean_file, stringsAsFactors = FALSE,
+                     row.names = NULL, check.names = FALSE,
+                     na.strings = c("", "NA", "N/A", "null", "-"))
+    unlink(clean_file)
   } else {
-    # TXT or other - detect delimiter
-    delimiter <- detect_delimiter(file_path)
-    data <- read.delim(file_path, sep = delimiter, stringsAsFactors = FALSE,
-                       check.names = FALSE, na.strings = c("", "NA", "N/A", "null", "-"))
+    # TXT or other - remove comments and detect delimiter
+    clean_file <- remove_comments(file_path)
+    delimiter <- detect_delimiter(clean_file)
+    data <- read.delim(clean_file, sep = delimiter, stringsAsFactors = FALSE,
+                       row.names = NULL, check.names = FALSE,
+                       na.strings = c("", "NA", "N/A", "null", "-"))
+    unlink(clean_file)
   }
 
   return(data)
+}
+
+#' Detect if data is in long format
+#' Returns TRUE if a parameter/variable column is detected
+detect_long_format <- function(data) {
+  col_names_lower <- tolower(names(data))
+
+  # Look for parameter/variable column indicators
+  param_patterns <- c("param", "variable", "var_name", "measure", "metric",
+                      "indicator", "pollutant", "species", "analyte")
+
+  for (pattern in param_patterns) {
+    if (any(grepl(pattern, col_names_lower))) {
+      return(TRUE)
+    }
+  }
+  return(FALSE)
+}
+
+#' Find likely column for a given purpose in long-format data
+find_likely_column <- function(col_names, patterns) {
+  col_names_lower <- tolower(col_names)
+  for (pattern in patterns) {
+    matches <- grep(pattern, col_names_lower, value = FALSE)
+    if (length(matches) > 0) {
+      return(col_names[matches[1]])
+    }
+  }
+  return(NULL)
+}
+
+#' Reshape long format data to wide format
+reshape_long_to_wide <- function(data, datetime_col, param_col, value_col,
+                                  unit_col = NULL, qc_col = NULL, valid_qc_flags = NULL) {
+
+  # Filter by QC flags if specified
+  if (!is.null(qc_col) && qc_col != "" && !is.null(valid_qc_flags) && length(valid_qc_flags) > 0) {
+    data <- data[data[[qc_col]] %in% valid_qc_flags, , drop = FALSE]
+  }
+
+  # Create unique parameter names (include units if available)
+  if (!is.null(unit_col) && unit_col != "" && unit_col %in% names(data)) {
+    # Combine parameter and unit for column names
+    data$param_with_unit <- paste0(data[[param_col]], "_", data[[unit_col]])
+  } else {
+    data$param_with_unit <- data[[param_col]]
+  }
+
+  # Keep only needed columns
+  cols_to_keep <- c(datetime_col, "param_with_unit", value_col)
+  data_subset <- data[, cols_to_keep, drop = FALSE]
+  names(data_subset) <- c("datetime", "parameter", "value")
+
+  # Convert value to numeric
+  data_subset$value <- as.numeric(data_subset$value)
+
+  # Pivot to wide format
+  wide_data <- data_subset %>%
+    group_by(datetime, parameter) %>%
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = parameter, values_from = value)
+
+  # Rename datetime column back
+  names(wide_data)[1] <- datetime_col
+
+  return(as.data.frame(wide_data))
 }
 
 #' Parse various date/time formats into POSIXct
@@ -769,17 +873,161 @@ server <- function(input, output, session) {
         }
       }
 
+      # Setup long-format selectors
+      updateSelectInput(session, "param_col", choices = col_choices)
+      updateSelectInput(session, "value_col", choices = col_choices)
+      updateSelectInput(session, "unit_col", choices = col_choices_optional)
+      updateSelectInput(session, "qc_col", choices = col_choices_optional)
+
+      # Auto-detect long format and pre-select likely columns
+      is_long <- detect_long_format(data)
+      updateCheckboxInput(session, "is_long_format", value = is_long)
+
+      if (is_long) {
+        # Try to find parameter column
+        param_match <- find_likely_column(col_names, c("param", "variable", "var_name",
+                                                        "measure", "pollutant", "analyte"))
+        if (!is.null(param_match)) {
+          updateSelectInput(session, "param_col", selected = param_match)
+        }
+
+        # Try to find value column
+        value_match <- find_likely_column(col_names, c("value", "result", "concentration",
+                                                        "reading", "measurement", "data"))
+        if (!is.null(value_match)) {
+          updateSelectInput(session, "value_col", selected = value_match)
+        }
+
+        # Try to find unit column
+        unit_match <- find_likely_column(col_names, c("unit", "uom", "units"))
+        if (!is.null(unit_match)) {
+          updateSelectInput(session, "unit_col", selected = unit_match)
+        }
+
+        # Try to find QC column
+        qc_match <- find_likely_column(col_names, c("qc", "flag", "quality", "valid",
+                                                     "status", "qualifier"))
+        if (!is.null(qc_match)) {
+          updateSelectInput(session, "qc_col", selected = qc_match)
+        }
+      }
+
     }, error = function(e) {
       showNotification(paste("Error reading file:", e$message), type = "error")
     })
   })
 
-  # Preview table
+  # Reactive for working data (original or reshaped from long format)
+  working_data <- reactiveVal(NULL)
+
+  # Keep working_data in sync with uploaded_data for wide format
+  observeEvent(uploaded_data(), {
+    if (!input$is_long_format) {
+      working_data(uploaded_data())
+    }
+  })
+
+  # Dynamic QC flag selector based on selected QC column
+  output$qc_flag_selector <- renderUI({
+    req(uploaded_data(), input$qc_col)
+    if (input$qc_col == "") return(NULL)
+
+    data <- uploaded_data()
+    if (!(input$qc_col %in% names(data))) return(NULL)
+
+    # Get unique QC flag values
+    qc_values <- unique(as.character(data[[input$qc_col]]))
+    qc_values <- qc_values[!is.na(qc_values) & qc_values != ""]
+    qc_values <- sort(qc_values)
+
+    if (length(qc_values) == 0) return(NULL)
+
+    checkboxGroupInput("valid_qc_flags", "Select Valid QC Flags:",
+                       choices = qc_values,
+                       selected = qc_values)  # Default: all selected
+  })
+
+  # Handle reshape button for long format data
+  observeEvent(input$apply_reshape, {
+    req(uploaded_data(), input$is_long_format)
+    req(input$param_col, input$value_col)
+
+    data <- uploaded_data()
+
+    tryCatch({
+      # Determine which datetime column to use based on mode
+      datetime_col <- switch(input$datetime_mode,
+                             "single" = input$datetime_col,
+                             "date_time" = input$date_col,
+                             "components" = input$year_col)
+
+      # Get valid QC flags
+      valid_qc <- if (!is.null(input$valid_qc_flags)) input$valid_qc_flags else NULL
+
+      # Reshape from long to wide
+      wide_data <- reshape_long_to_wide(
+        data = data,
+        datetime_col = datetime_col,
+        param_col = input$param_col,
+        value_col = input$value_col,
+        unit_col = if (input$unit_col != "") input$unit_col else NULL,
+        qc_col = if (input$qc_col != "") input$qc_col else NULL,
+        valid_qc_flags = valid_qc
+      )
+
+      # Store reshaped data
+      working_data(wide_data)
+
+      # Update column selectors with new wide-format columns
+      col_names <- names(wide_data)
+      col_choices <- setNames(col_names, col_names)
+      col_choices_optional <- c("(none)" = "", col_choices)
+
+      updateSelectInput(session, "datetime_col", choices = col_choices, selected = col_names[1])
+      updateSelectInput(session, "date_col", choices = col_choices, selected = col_names[1])
+      updateSelectInput(session, "speed_col", choices = col_choices_optional)
+      updateSelectInput(session, "dir_col", choices = col_choices_optional)
+      updateSelectInput(session, "temp_col", choices = col_choices_optional)
+
+      # Try to auto-detect columns in reshaped data
+      for (col_name in col_names) {
+        detected <- detect_units(col_name, wide_data[[col_name]])
+        if (detected$type == "speed") {
+          updateSelectInput(session, "speed_col", selected = col_name)
+        }
+        if (detected$type == "direction") {
+          updateSelectInput(session, "dir_col", selected = col_name)
+        }
+        if (detected$type == "temp") {
+          updateSelectInput(session, "temp_col", selected = col_name)
+        }
+      }
+
+      showNotification(sprintf("Reshaped data: %d rows, %d columns", nrow(wide_data), ncol(wide_data)),
+                       type = "message")
+
+    }, error = function(e) {
+      showNotification(paste("Error reshaping data:", e$message), type = "error")
+    })
+  })
+
+  # Preview table - show working data if available, otherwise uploaded data
   output$preview_table <- renderDT({
-    req(uploaded_data())
-    datatable(head(uploaded_data(), 100),
+    data_to_show <- working_data()
+    if (is.null(data_to_show)) {
+      data_to_show <- uploaded_data()
+    }
+    req(data_to_show)
+
+    caption_text <- if (!is.null(working_data()) && input$is_long_format) {
+      "Reshaped data (wide format) - First 100 rows"
+    } else {
+      "First 100 rows of uploaded data"
+    }
+
+    datatable(head(data_to_show, 100),
               options = list(scrollX = TRUE, pageLength = 10),
-              caption = "First 100 rows of uploaded data")
+              caption = caption_text)
   })
 
   # Parse info
@@ -797,9 +1045,12 @@ server <- function(input, output, session) {
 
   # Process data
   observeEvent(input$process, {
-    req(uploaded_data())
-
-    data <- uploaded_data()
+    # Use working_data if available (reshaped long format), otherwise uploaded_data
+    data <- working_data()
+    if (is.null(data)) {
+      data <- uploaded_data()
+    }
+    req(data)
 
     tryCatch({
       # Parse datetime based on selected mode
