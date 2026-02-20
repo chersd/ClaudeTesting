@@ -1745,7 +1745,7 @@ server <- function(input, output, session) {
 
       # --- Generate the PNG ---
       png(plot_path, width = 1980, height = 1200, pointsize = 24)
-      par(mar = c(8, 8, 3, 8), mgp = c(5, 2, 0))
+      par(mar = c(8, 9, 3, 8), mgp = c(5, 2, 0))
 
       # Replace NA with 0 for barplot (barplot can't handle NA heights),
       # but track which are true gaps
@@ -1803,8 +1803,8 @@ server <- function(input, output, session) {
       leg_lwd <- c(rep(NA, length(txtCols)), 3, 3, 3)
       leg_col <- c(rep(NA, length(txtCols)), 6, 1, 1)
       leg_txtcol <- c(txtCols, 6, 1, 1)
-      gust_label <- paste0("Max gust @ ", met_site)
-      ws_label <- paste0("Avg wind @ ", met_site)
+      gust_label <- paste0("Gusts: ", met_site)
+      ws_label <- paste0("Avg wind: ", met_site)
       leg_labels <- c(concSpec, gust_label, ws_label, "Wind threshold")
 
       # Dynamically choose number of legend columns based on label widths
@@ -1823,7 +1823,7 @@ server <- function(input, output, session) {
              fill = leg_fill, lty = leg_lty, border = FALSE,
              lwd = leg_lwd, col = leg_col, text.col = leg_txtcol,
              legend = leg_labels,
-             box.lty = 0, cex = 2.5, bg = "transparent",
+             box.lty = 0, cex = 2, bg = "transparent",
              x.intersp = 0.6, seg.len = 0.6)
 
       box()
