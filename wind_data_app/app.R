@@ -10,6 +10,9 @@ library(dplyr)
 library(lubridate)
 library(DT)
 library(readxl)
+library(tidyr)
+library(base64enc)
+library(shinyBS)
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -42,26 +45,128 @@ detect_delimiter <- function(file_path, n_lines = 10) {
   return(delimiters[best_idx])
 }
 
+#' Remove comment lines from a file and return clean temp file path
+remove_comments <- function(file_path) {
+  lines <- readLines(file_path, warn = FALSE)
+
+  # Remove lines starting with comment characters (after trimming whitespace)
+  comment_patterns <- c("^\\s*#", "^\\s*\\*", "^\\s*//", "^\\s*;\\s*[^0-9]")
+
+  clean_lines <- lines
+  for (pattern in comment_patterns) {
+    clean_lines <- clean_lines[!grepl(pattern, clean_lines)]
+  }
+
+  # Remove empty lines at start and end
+  while (length(clean_lines) > 0 && trimws(clean_lines[1]) == "") {
+    clean_lines <- clean_lines[-1]
+  }
+  while (length(clean_lines) > 0 && trimws(clean_lines[length(clean_lines)]) == "") {
+    clean_lines <- clean_lines[-length(clean_lines)]
+  }
+
+  # Write to temp file
+  temp_file <- tempfile(fileext = ".txt")
+  writeLines(clean_lines, temp_file)
+  return(temp_file)
+}
+
 #' Read data file (CSV, Excel, or delimited text)
 read_data_file <- function(file_path, file_ext) {
   file_ext <- tolower(file_ext)
 
   if (file_ext %in% c("xls", "xlsx")) {
-    # Read Excel file
+    # Read Excel file (comments handled differently - skip rows starting with #)
     data <- read_excel(file_path, na = c("", "NA", "N/A", "null", "-"))
     data <- as.data.frame(data, stringsAsFactors = FALSE)
+    # Remove any rows where first column starts with comment char
+    if (nrow(data) > 0 && ncol(data) > 0) {
+      first_col <- as.character(data[[1]])
+      comment_rows <- grepl("^\\s*[#*]", first_col)
+      data <- data[!comment_rows, , drop = FALSE]
+    }
   } else if (file_ext == "csv") {
-    # Read CSV file
-    data <- read.csv(file_path, stringsAsFactors = FALSE,
+    # Remove comments first
+    clean_file <- remove_comments(file_path)
+    data <- read.csv(clean_file, stringsAsFactors = FALSE,
                      check.names = FALSE, na.strings = c("", "NA", "N/A", "null", "-"))
+    unlink(clean_file)
   } else {
-    # TXT or other - detect delimiter
-    delimiter <- detect_delimiter(file_path)
-    data <- read.delim(file_path, sep = delimiter, stringsAsFactors = FALSE,
+    # TXT or other - remove comments and detect delimiter
+    clean_file <- remove_comments(file_path)
+    delimiter <- detect_delimiter(clean_file)
+    data <- read.delim(clean_file, sep = delimiter, stringsAsFactors = FALSE,
                        check.names = FALSE, na.strings = c("", "NA", "N/A", "null", "-"))
+    unlink(clean_file)
   }
 
   return(data)
+}
+
+#' Detect if data is in long format
+#' Returns TRUE if a parameter/variable column is detected
+detect_long_format <- function(data) {
+  col_names_lower <- tolower(names(data))
+
+  # Look for parameter/variable column indicators
+  param_patterns <- c("param", "variable", "var_name", "measure", "metric",
+                      "indicator", "pollutant", "species", "analyte")
+
+  for (pattern in param_patterns) {
+    if (any(grepl(pattern, col_names_lower))) {
+      return(TRUE)
+    }
+  }
+  return(FALSE)
+}
+
+#' Find likely column for a given purpose in long-format data
+find_likely_column <- function(col_names, patterns) {
+  col_names_lower <- tolower(col_names)
+  for (pattern in patterns) {
+    matches <- grep(pattern, col_names_lower, value = FALSE)
+    if (length(matches) > 0) {
+      return(col_names[matches[1]])
+    }
+  }
+  return(NULL)
+}
+
+#' Reshape long format data to wide format
+reshape_long_to_wide <- function(data, datetime_col, param_col, value_col,
+                                  unit_col = NULL, qc_col = NULL, valid_qc_flags = NULL) {
+
+  # Filter by QC flags if specified
+  if (!is.null(qc_col) && qc_col != "" && !is.null(valid_qc_flags) && length(valid_qc_flags) > 0) {
+    data <- data[data[[qc_col]] %in% valid_qc_flags, , drop = FALSE]
+  }
+
+  # Create unique parameter names (include units if available)
+  if (!is.null(unit_col) && unit_col != "" && unit_col %in% names(data)) {
+    # Combine parameter and unit for column names
+    data$param_with_unit <- paste0(data[[param_col]], "_", data[[unit_col]])
+  } else {
+    data$param_with_unit <- data[[param_col]]
+  }
+
+  # Keep only needed columns
+  cols_to_keep <- c(datetime_col, "param_with_unit", value_col)
+  data_subset <- data[, cols_to_keep, drop = FALSE]
+  names(data_subset) <- c("datetime", "parameter", "value")
+
+  # Convert value to numeric
+  data_subset$value <- as.numeric(data_subset$value)
+
+  # Pivot to wide format
+  wide_data <- data_subset %>%
+    group_by(datetime, parameter) %>%
+    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    pivot_wider(names_from = parameter, values_from = value)
+
+  # Rename datetime column back
+  names(wide_data)[1] <- datetime_col
+
+  return(as.data.frame(wide_data))
 }
 
 #' Parse various date/time formats into POSIXct
@@ -89,9 +194,13 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
                             as.numeric(day_vals),
                             as.numeric(hour_vals),
                             as.numeric(minute_vals))
+<<<<<<< HEAD
 
     return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "Etc/GMT"))
     return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "PST8"))
+=======
+    return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = ""))
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   }
 
   # Case 2: Single datetime column or date + time columns
@@ -109,17 +218,22 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
 }
 
 #' Parse datetime strings in various formats
+<<<<<<< HEAD
 
 parse_datetime_string <- function(datetime_str) {
 
 parse_datetime_string <- function(datetime_str, adjust_dst) {
 
+=======
+parse_datetime_string <- function(datetime_str, adjust_dst = TRUE) {
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   datetime_str <- trimws(datetime_str)
   n <- length(datetime_str)
   result <- rep(as.POSIXct(NA), n)
 
   # Detect and handle timezone abbreviations
   # Daylight time zones need -1 hour adjustment to convert to standard time
+<<<<<<< HEAD
   daylight_tz_pattern <- "-0.0{0,2}$|\\s+(PDT|EDT|CDT|MDT|ADT|AKDT|-0.0{0,2})$"
   standard_tz_pattern <- "-0.0{0,2}$|\\s+(PST|EST|CST|MST|AST|AKST|HST|UTC|GMT|-0.0{0,2})$"
 
@@ -127,6 +241,15 @@ parse_datetime_string <- function(datetime_str, adjust_dst) {
   # needs_dst_adjustment <- grepl(daylight_tz_pattern, datetime_str, ignore.case = TRUE)
 
   # # Remove timezone abbreviations from strings before parsing
+=======
+  daylight_tz_pattern <- "\\s+(PDT|EDT|CDT|MDT|ADT|AKDT)$"
+  standard_tz_pattern <- "\\s+(PST|EST|CST|MST|AST|AKST|HST|UTC|GMT)$"
+
+  # Track which entries need daylight adjustment
+  needs_dst_adjustment <- grepl(daylight_tz_pattern, datetime_str, ignore.case = TRUE)
+
+  # Remove timezone abbreviations from strings before parsing
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   datetime_str <- gsub(daylight_tz_pattern, "", datetime_str, ignore.case = TRUE)
   datetime_str <- gsub(standard_tz_pattern, "", datetime_str, ignore.case = TRUE)
   datetime_str <- trimws(datetime_str)
@@ -192,9 +315,13 @@ browser("280")
                        "%Y-%m-%d %I:%M:%S %p", "%Y/%m/%d %I:%M:%S %p",
                        "%Y-%m-%d %I:%M %p", "%Y/%m/%d %I:%M %p")
     for (fmt in am_pm_formats) {
+<<<<<<< HEAD
 
       parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "Etc/GMT")
       parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "PST8")
+=======
+      parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       if (sum(!is.na(parsed)) > sum(!is.na(result[am_pm_idx]))) {
         result[am_pm_idx] <- parsed
       }
@@ -213,9 +340,13 @@ browser("300")
         numeric_idx <- grepl("^\\d{9,10}$", remaining_str)
         if (any(numeric_idx)) {
           posix_vals <- as.numeric(remaining_str[numeric_idx])
+<<<<<<< HEAD
 
           parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "Etc/GMT")
           parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "PST8")
+=======
+          parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
           temp_result <- result[remaining_idx]
           temp_result[numeric_idx] <- parsed_posix
           result[remaining_idx] <- temp_result
@@ -230,8 +361,12 @@ browser("300")
             temp_str <- gsub("Z$", "", temp_str)
             # Remove timezone offset
             temp_str <- gsub("[+-]\\d{2}:\\d{2}$", "", temp_str)
+<<<<<<< HEAD
             parsed <- as.POSIXct(temp_str, format = fmt, tz = "Etc/GMT")
             parsed <- as.POSIXct(temp_str, format = fmt, tz = "PST8")
+=======
+            parsed <- as.POSIXct(temp_str, format = fmt, tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
 
             temp_result <- result[remaining_idx]
             temp_still_na <- is.na(temp_result)
@@ -250,9 +385,14 @@ browser("300")
   # Apply daylight saving adjustment: subtract 1 hour for daylight time zones
   # This converts daylight time to standard time
   # Skipped when adjust_dst = FALSE (e.g. pollutant data already in local time)
+<<<<<<< HEAD
   if (adjust_dst && !is.na(result)) { # any(needs_dst_adjustment & !is.na(result))) {
 #    result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
     result <- result - 3600  # subtract 1 hour (3600 seconds)
+=======
+  if (adjust_dst && any(needs_dst_adjustment & !is.na(result))) {
+    result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   }
 
   # Fix 2-digit years that weren't properly converted
@@ -270,18 +410,36 @@ browser("300")
         new_year <- if (yr <= 50) 2000 + yr else 1900 + yr
         # Rebuild the datetime string with correct year
         new_dt_str <- format(result[i], paste0(new_year, "-%m-%d %H:%M:%S"))
+<<<<<<< HEAD
         result[i] <- as.POSIXct(new_dt_str, format = "%Y-%m-%d %H:%M:%S", tz = "PST8")
+=======
+        result[i] <- as.POSIXct(new_dt_str, format = "%Y-%m-%d %H:%M:%S", tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       }
     }
   }
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   return(result)
 }
 
 #' Detect units from column name
 detect_units <- function(col_name, data_values = NULL) {
   col_lower <- tolower(col_name)
+
+  # Wind gust detection (check before general speed)
+  if (grepl("gust|gst|peak.*wind|max.*wind|wind.*max|wind.*peak", col_lower)) {
+    # Check for units in gust column name
+    if (grepl("mph|mi.*h|mile", col_lower)) return(list(type = "gust", unit = "mph"))
+    if (grepl("km.*h|kmh|kph", col_lower)) return(list(type = "gust", unit = "kmh"))
+    if (grepl("m.*s|ms|mps|meter.*sec", col_lower)) return(list(type = "gust", unit = "ms"))
+    if (grepl("knot|kt|kn", col_lower)) return(list(type = "gust", unit = "knots"))
+    if (grepl("ft.*s|fps", col_lower)) return(list(type = "gust", unit = "fts"))
+    return(list(type = "gust", unit = "unknown"))
+  }
 
   # Wind speed units
   if (grepl("mph|mi.*h|mile", col_lower)) return(list(type = "speed", unit = "mph"))
@@ -400,69 +558,160 @@ vector_average_direction <- function(directions, speeds = NULL) {
 
 #' Perform hourly averaging on the dataset
 hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NULL,
-                           speed_unit, temp_unit = NULL) {
+                           gust_col = NULL, speed_unit, gust_unit = NULL, temp_unit = NULL) {
 
   # Ensure datetime is POSIXct
   data$datetime <- data[[datetime_col]]
   if (!inherits(data$datetime, "POSIXct")) {
+<<<<<<< HEAD
 # # # < claude/air-quality-data-comparison-39kax
     data$datetime <- as.POSIXct(data$datetime, tz = "Etc/GMT")
 # ===
     data$datetime <- as.POSIXct(data$datetime, tz = "PST8")
 # # # > local
+=======
+    data$datetime <- as.POSIXct(data$datetime, tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   }
 
   # Create hour floor for grouping
   data$hour_group <- floor_date(data$datetime, unit = "hour")
 
-  # Get numeric values
-  data$wind_speed <- as.numeric(data[[speed_col]])
-  data$wind_dir <- as.numeric(data[[dir_col]])
-
-  if (!is.null(temp_col) && temp_col != "" && temp_col %in% names(data)) {
-    data$temperature <- as.numeric(data[[temp_col]])
-    has_temp <- TRUE
+  # Get numeric values - handle case where speed_col might be empty (gust only)
+  has_speed <- !is.null(speed_col) && speed_col != "" && speed_col %in% names(data)
+  if (has_speed) {
+    data$wind_speed <- as.numeric(data[[speed_col]])
   } else {
-    has_temp <- FALSE
+    data$wind_speed <- NA_real_
+  }
+
+  # Handle direction - might not exist if only gust data
+  has_dir <- !is.null(dir_col) && dir_col != "" && dir_col %in% names(data)
+  if (has_dir) {
+    data$wind_dir <- as.numeric(data[[dir_col]])
+  } else {
+    data$wind_dir <- NA_real_
+  }
+
+  # Handle gust data
+  has_gust <- !is.null(gust_col) && gust_col != "" && gust_col %in% names(data)
+  if (has_gust) {
+    data$wind_gust <- as.numeric(data[[gust_col]])
+  }
+
+  # Handle temperature
+  has_temp <- !is.null(temp_col) && temp_col != "" && temp_col %in% names(data)
+  if (has_temp) {
+    data$temperature <- as.numeric(data[[temp_col]])
   }
 
   # Group by hour and calculate averages
   hourly_data <- data %>%
     group_by(hour_group) %>%
     summarise(
-      wind_speed_avg = mean(wind_speed, na.rm = TRUE),
-      wind_dir_avg = vector_average_direction(wind_dir, wind_speed),
+      wind_speed_avg = if (has_speed) mean(wind_speed, na.rm = TRUE) else NA_real_,
+      wind_dir_avg = if (has_dir && has_speed) vector_average_direction(wind_dir, wind_speed)
+                     else if (has_dir) vector_average_direction(wind_dir) else NA_real_,
+      gust_max = if (has_gust) max(wind_gust, na.rm = TRUE) else NA_real_,
       temp_avg = if (has_temp) mean(temperature, na.rm = TRUE) else NA_real_,
       n_obs = n(),
       .groups = "drop"
     ) %>%
     arrange(hour_group)
 
+  # Handle infinite values from max() on empty data
+  if (has_gust) {
+    hourly_data$gust_max[is.infinite(hourly_data$gust_max)] <- NA_real_
+  }
+
   # Convert units
-  hourly_data$wind_speed_mph <- convert_to_mph(hourly_data$wind_speed_avg, speed_unit)
+  if (has_speed) {
+    hourly_data$wind_speed_mph <- convert_to_mph(hourly_data$wind_speed_avg, speed_unit)
+  }
+
+  if (has_gust) {
+    gust_unit_to_use <- if (!is.null(gust_unit) && gust_unit != "") gust_unit else speed_unit
+    hourly_data$gust_mph <- convert_to_mph(hourly_data$gust_max, gust_unit_to_use)
+  }
 
   if (has_temp && !is.null(temp_unit)) {
     hourly_data$temp_f <- convert_to_fahrenheit(hourly_data$temp_avg, temp_unit)
-  } else {
-    hourly_data$temp_f <- NA_real_
   }
 
   # Round direction to nearest degree
-  hourly_data$wind_dir_deg <- round(hourly_data$wind_dir_avg, 0)
+  if (has_dir) {
+    hourly_data$wind_dir_deg <- round(hourly_data$wind_dir_avg, 0)
+  }
 
-  # Prepare output (no POSIX timestamp, just formatted datetime)
+  # Calculate u and v wind vector components (using output speed in mph)
+  # u = east-west component (positive = wind from west)
+  # v = north-south component (positive = wind from south)
+  if (has_speed && has_dir) {
+    dir_rad <- hourly_data$wind_dir_avg * pi / 180
+    hourly_data$u_mph <- hourly_data$wind_speed_mph * sin(dir_rad)
+    hourly_data$v_mph <- hourly_data$wind_speed_mph * cos(dir_rad)
+  }
+
+  # Prepare hourly output (no POSIX timestamp, just formatted datetime)
   output <- data.frame(
     DateTime = format(hourly_data$hour_group, "%Y-%m-%d %H:%M"),
-    Wind_Speed_mph = round(hourly_data$wind_speed_mph, 2),
-    Wind_Direction_deg = hourly_data$wind_dir_deg,
     stringsAsFactors = FALSE
   )
+
+  # Add columns based on what data is available
+  if (has_speed) {
+    output$Wind_Speed_mph <- round(hourly_data$wind_speed_mph, 2)
+  }
+
+  if (has_dir) {
+    output$Wind_Direction_deg <- hourly_data$wind_dir_deg
+  }
+
+  # Add u and v components if both speed and direction are available
+  if (has_speed && has_dir) {
+    output$U_mph <- round(hourly_data$u_mph, 3)
+    output$V_mph <- round(hourly_data$v_mph, 3)
+  }
+
+  if (has_gust) {
+    output$Wind_Gust_mph <- round(hourly_data$gust_mph, 2)
+  }
 
   if (has_temp) {
     output$Temperature_F <- round(hourly_data$temp_f, 1)
   }
 
-  return(output)
+  # Prepare sub-hourly output with consistent column names, units, and date format
+  subhourly <- data.frame(
+    DateTime = format(data$datetime, "%Y-%m-%d %H:%M"),
+    stringsAsFactors = FALSE
+  )
+
+  if (has_speed) {
+    subhourly$Wind_Speed_mph <- round(convert_to_mph(data$wind_speed, speed_unit), 2)
+  }
+
+  if (has_dir) {
+    subhourly$Wind_Direction_deg <- round(data$wind_dir, 0)
+  }
+
+  if (has_speed && has_dir) {
+    dir_rad_sub <- data$wind_dir * pi / 180
+    speed_mph_sub <- convert_to_mph(data$wind_speed, speed_unit)
+    subhourly$U_mph <- round(speed_mph_sub * sin(dir_rad_sub), 3)
+    subhourly$V_mph <- round(speed_mph_sub * cos(dir_rad_sub), 3)
+  }
+
+  if (has_gust) {
+    gust_unit_to_use <- if (!is.null(gust_unit) && gust_unit != "") gust_unit else speed_unit
+    subhourly$Wind_Gust_mph <- round(convert_to_mph(data$wind_gust, gust_unit_to_use), 2)
+  }
+
+  if (has_temp && !is.null(temp_unit)) {
+    subhourly$Temperature_F <- round(convert_to_fahrenheit(data$temperature, temp_unit), 1)
+  }
+
+  return(list(hourly = output, subhourly = subhourly))
 }
 
 # ============================================================================
@@ -483,8 +732,11 @@ ui <- fluidPage(
                            "application/vnd.ms-excel",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
 
+<<<<<<< HEAD
 # # # < claude/air-quality-data-comparison-39kax
 # ===
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       # Meteorological site name
       textInput("met_data_site", "Meteorological Site Name:",
                 placeholder = "e.g., KVNY, KLAX"),
@@ -502,6 +754,7 @@ ui <- fluidPage(
                 "Air quality agencies usually timestamp data at the START of the hour while meteorological data sources usually timestamp data at the END of the hour.",
                 placement = "right", trigger = "hover"),
 
+<<<<<<< HEAD
 
 		radioButtons("met_timeZone",
 						   tags$span("Meteorological data timestamps are in:",
@@ -512,6 +765,8 @@ ui <- fluidPage(
 			  bsTooltip("met_TZ_info",
 						"Cannot accept met data that are from a different timezone.",
 						placement = "right", trigger = "hover"),
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       hr(),
 
       # Long format configuration
@@ -530,7 +785,10 @@ ui <- fluidPage(
         )
       ),
 
+<<<<<<< HEAD
 # # # > local
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       hr(),
 
       # Date/Time configuration
@@ -568,7 +826,7 @@ ui <- fluidPage(
 
       # Wind speed configuration
       h4("Wind Speed"),
-      selectInput("speed_col", "Wind Speed Column:", choices = NULL),
+      selectInput("speed_col", "Wind Speed Column (optional if gust provided):", choices = NULL),
       selectInput("speed_unit", "Speed Units:",
                   choices = list(
                     "mph (miles per hour)" = "mph",
@@ -587,16 +845,17 @@ ui <- fluidPage(
 
       hr(),
 
+      # Wind gust configuration (optional)
+      h4("Wind Gust (Optional)"),
+      selectInput("gust_col", "Wind Gust Column:", choices = NULL),
+      uiOutput("gust_unit_ui"),
+
+      hr(),
+
       # Temperature configuration (optional)
       h4("Temperature (Optional)"),
       selectInput("temp_col", "Temperature Column:", choices = NULL),
-      selectInput("temp_unit", "Temperature Units:",
-                  choices = list(
-                    "Fahrenheit (°F)" = "F",
-                    "Celsius (°C)" = "C",
-                    "Kelvin (K)" = "K"
-                  ),
-                  selected = "F"),
+      uiOutput("temp_unit_ui"),
 
       hr(),
 
@@ -604,7 +863,23 @@ ui <- fluidPage(
 
       hr(),
 
-      downloadButton("download", "Download Results")
+      downloadButton("download", "Download Hourly Results"),
+      downloadButton("download_subhourly", "Download Sub-Hourly Results"),
+
+      hr(),
+
+      # ---- Pollutant Data Section ----
+      h3("Pollutant Data"),
+
+      fileInput("pollutant_file", "Upload Pollutant CSV (Long Format)",
+                accept = c(".csv", "text/csv")),
+
+      uiOutput("site_name_selector"),
+      uiOutput("pollutant_param_selector"),
+      uiOutput("pollutant_date_selector"),
+
+      actionButton("process_pollutant", "Process & Plot Pollutant Data",
+                    class = "btn-success btn-lg")
     ),
 
     mainPanel(
@@ -623,8 +898,20 @@ ui <- fluidPage(
                  p("Wind direction: vector averaged | Wind speed & temperature: scalar averaged"),
                  DTOutput("result_table"),
                  hr(),
+                 h4("Sub-Hourly Data (Standardized)"),
+                 p("Original time resolution with consistent column names, date format, and units (mph / °F)"),
+                 DTOutput("subhourly_table"),
+                 hr(),
                  h4("Summary Statistics"),
                  verbatimTextOutput("summary_stats")
+        ),
+
+        tabPanel("Pollutant Plot",
+                 h4("Pollutant vs Wind Data"),
+                 uiOutput("pollutant_plot_ui"),
+                 hr(),
+                 h4("Merged Data Preview"),
+                 DTOutput("merged_data_table")
         ),
 
         tabPanel("Help",
@@ -635,6 +922,19 @@ ui <- fluidPage(
                    tags$li("XLS - Excel 97-2003 format"),
                    tags$li("XLSX - Excel 2007+ format")
                  ),
+                 p(em("Comment lines starting with #, *, or // are automatically ignored.")),
+
+                 h4("Long Format Data"),
+                 p("If your data is in long format (parameters in rows rather than columns):"),
+                 tags$ul(
+                   tags$li("Check 'Long format' checkbox"),
+                   tags$li("Select the Parameter/Variable column (contains variable names)"),
+                   tags$li("Select the Value column (contains measurements)"),
+                   tags$li("Optionally select Units column"),
+                   tags$li("Optionally select QC Flag column and choose which flags are valid"),
+                   tags$li("Click 'Apply & Reshape Data' to convert to wide format")
+                 ),
+
                  h4("Supported Date/Time Formats"),
                  tags$ul(
                    tags$li("POSIX timestamp (Unix epoch seconds)"),
@@ -643,8 +943,10 @@ ui <- fluidPage(
                    tags$li("Separators: dashes (-), slashes (/), spaces, or none"),
                    tags$li("Compact: ddmmYYYYHHMMSS or mmddYYYYHHMMSS"),
                    tags$li("12-hour format with AM/PM"),
-                   tags$li("Separate columns for year, month, day, hour, minute")
+                   tags$li("Separate columns for year, month, day, hour, minute"),
+                   tags$li("Timezone abbreviations: PST, EST, CST, MST, PDT, EDT, CDT, MDT, etc.")
                  ),
+                 p(em("Daylight time zones (PDT, EDT, CDT, MDT) are automatically converted to standard time.")),
                  h4("Wind Speed Units Supported"),
                  tags$ul(
                    tags$li("mph - miles per hour"),
@@ -663,17 +965,23 @@ ui <- fluidPage(
                  tags$ul(
                    tags$li(strong("Wind Direction:"), " Vector averaging using u/v component decomposition"),
                    tags$li(strong("Wind Speed:"), " Scalar (arithmetic) mean"),
+                   tags$li(strong("Wind Gust:"), " Maximum value per hour"),
                    tags$li(strong("Temperature:"), " Scalar (arithmetic) mean")
                  ),
                  h4("Output"),
-                 p("The processed data includes:"),
+                 p("The processed data includes (columns shown only if data available):"),
                  tags$ul(
                    tags$li("DateTime (YYYY-MM-DD HH:MM)"),
                    tags$li("Wind speed in mph"),
                    tags$li("Wind direction in degrees (0-360)"),
-                   tags$li("Temperature in Fahrenheit (if provided)")
+                   tags$li("U_mph - east-west wind vector component (positive = from west)"),
+                   tags$li("V_mph - north-south wind vector component (positive = from south)"),
+                   tags$li("Wind gust in mph (hourly maximum)"),
+                   tags$li("Temperature in Fahrenheit")
                  ),
-                 p(em("Note: All times are treated as local standard time year-round (no DST adjustment)."))
+                 p(em("Note: U and V components are included when both speed and direction are available.")),
+                 p(em("At least wind speed OR wind gust must be provided. Temperature and direction are optional.")),
+                 p(em("All output times are in local standard time. Daylight time inputs are adjusted automatically."))
         )
       )
     )
@@ -717,25 +1025,36 @@ server <- function(input, output, session) {
       updateSelectInput(session, "hour_col", choices = col_choices)
       updateSelectInput(session, "minute_col", choices = col_choices_optional)
 
-      updateSelectInput(session, "speed_col", choices = col_choices)
-      updateSelectInput(session, "dir_col", choices = col_choices)
+      updateSelectInput(session, "speed_col", choices = col_choices_optional)
+      updateSelectInput(session, "dir_col", choices = col_choices_optional)
+      updateSelectInput(session, "gust_col", choices = col_choices_optional)
       updateSelectInput(session, "temp_col", choices = col_choices_optional)
+
+      # Track detected units for gust and temp
+      detected_gust_unit <- NULL
+      detected_temp_unit <- NULL
 
       # Try to auto-detect columns based on names
       for (i in seq_along(col_names)) {
         col_name <- col_names[i]
         detected <- detect_units(col_name, data[[col_name]])
 
+        unit_map <- c("mph" = "mph", "ms" = "ms", "m/s" = "ms",
+                      "kmh" = "kmh", "km/h" = "kmh", "kph" = "kmh",
+                      "knots" = "knots", "kn" = "knots", "kt" = "knots",
+                      "fts" = "fts", "ft/s" = "fts")
+
         if (detected$type == "speed") {
           updateSelectInput(session, "speed_col", selected = col_name)
-          if (detected$unit != "unknown") {
-            unit_map <- c("mph" = "mph", "ms" = "ms", "m/s" = "ms",
-                          "kmh" = "kmh", "km/h" = "kmh", "kph" = "kmh",
-                          "knots" = "knots", "kn" = "knots", "kt" = "knots",
-                          "fts" = "fts", "ft/s" = "fts")
-            if (detected$unit %in% names(unit_map)) {
-              updateSelectInput(session, "speed_unit", selected = unit_map[detected$unit])
-            }
+          if (detected$unit != "unknown" && detected$unit %in% names(unit_map)) {
+            updateSelectInput(session, "speed_unit", selected = unit_map[detected$unit])
+          }
+        }
+
+        if (detected$type == "gust") {
+          updateSelectInput(session, "gust_col", selected = col_name)
+          if (detected$unit != "unknown" && detected$unit %in% names(unit_map)) {
+            detected_gust_unit <<- unit_map[detected$unit]
           }
         }
 
@@ -746,7 +1065,7 @@ server <- function(input, output, session) {
         if (detected$type == "temp") {
           updateSelectInput(session, "temp_col", selected = col_name)
           if (detected$unit != "unknown") {
-            updateSelectInput(session, "temp_unit", selected = detected$unit)
+            detected_temp_unit <<- detected$unit
           }
         }
       }
@@ -779,17 +1098,198 @@ server <- function(input, output, session) {
         }
       }
 
+      # Setup long-format selectors
+      updateSelectInput(session, "param_col", choices = col_choices)
+      updateSelectInput(session, "value_col", choices = col_choices)
+      updateSelectInput(session, "unit_col", choices = col_choices_optional)
+      updateSelectInput(session, "qc_col", choices = col_choices_optional)
+
+      # Auto-detect long format and pre-select likely columns
+      is_long <- detect_long_format(data)
+      updateCheckboxInput(session, "is_long_format", value = is_long)
+
+      if (is_long) {
+        # Try to find parameter column
+        param_match <- find_likely_column(col_names, c("param", "variable", "var_name",
+                                                        "measure", "pollutant", "analyte"))
+        if (!is.null(param_match)) {
+          updateSelectInput(session, "param_col", selected = param_match)
+        }
+
+        # Try to find value column
+        value_match <- find_likely_column(col_names, c("value", "result", "concentration",
+                                                        "reading", "measurement", "data"))
+        if (!is.null(value_match)) {
+          updateSelectInput(session, "value_col", selected = value_match)
+        }
+
+        # Try to find unit column
+        unit_match <- find_likely_column(col_names, c("unit", "uom", "units"))
+        if (!is.null(unit_match)) {
+          updateSelectInput(session, "unit_col", selected = unit_match)
+        }
+
+        # Try to find QC column
+        qc_match <- find_likely_column(col_names, c("qc", "flag", "quality", "valid",
+                                                     "status", "qualifier"))
+        if (!is.null(qc_match)) {
+          updateSelectInput(session, "qc_col", selected = qc_match)
+        }
+      }
+
     }, error = function(e) {
       showNotification(paste("Error reading file:", e$message), type = "error")
     })
   })
 
-  # Preview table
+  # Reactive for working data (original or reshaped from long format)
+  working_data <- reactiveVal(NULL)
+
+  # Keep working_data in sync with uploaded_data for wide format
+
+  observeEvent(uploaded_data(), {
+    if (!input$is_long_format) {
+      working_data(uploaded_data())
+    }
+  })
+
+  # Dynamic QC flag selector based on selected QC column
+  output$qc_flag_selector <- renderUI({
+    req(uploaded_data(), input$qc_col)
+    if (input$qc_col == "") return(NULL)
+
+    data <- uploaded_data()
+    if (!(input$qc_col %in% names(data))) return(NULL)
+
+    # Get unique QC flag values
+    qc_values <- unique(as.character(data[[input$qc_col]]))
+    qc_values <- qc_values[!is.na(qc_values) & qc_values != ""]
+    qc_values <- sort(qc_values)
+
+    if (length(qc_values) == 0) return(NULL)
+
+    checkboxGroupInput("valid_qc_flags", "Select Valid QC Flags:",
+                       choices = qc_values,
+                       selected = qc_values)  # Default: all selected
+  })
+
+  # Conditional gust units selector - only show if gust column is selected
+  output$gust_unit_ui <- renderUI({
+    req(input$gust_col)
+    if (input$gust_col == "") return(NULL)
+
+    selectInput("gust_unit", "Gust Units:",
+                choices = list(
+                  "Same as wind speed" = "",
+                  "mph (miles per hour)" = "mph",
+                  "m/s (meters per second)" = "ms",
+                  "km/h (kilometers per hour)" = "kmh",
+                  "knots" = "knots",
+                  "ft/s (feet per second)" = "fts"
+                ),
+                selected = "")
+  })
+
+  # Conditional temperature units selector - only show if temp column is selected
+  output$temp_unit_ui <- renderUI({
+    req(input$temp_col)
+    if (input$temp_col == "") return(NULL)
+
+    selectInput("temp_unit", "Temperature Units:",
+                choices = list(
+                  "Fahrenheit (°F)" = "F",
+                  "Celsius (°C)" = "C",
+                  "Kelvin (K)" = "K"
+                ),
+                selected = "F")
+  })
+
+  # Handle reshape button for long format data
+  observeEvent(input$apply_reshape, {
+    req(uploaded_data(), input$is_long_format)
+    req(input$param_col, input$value_col, input$datetime_col)
+
+    data <- uploaded_data()
+
+    tryCatch({
+      # Determine which datetime column to use based on mode
+      datetime_col <- switch(input$datetime_mode,
+                             "single" = input$datetime_col,
+                             "date_time" = input$date_col,
+                             "components" = input$year_col)
+
+      # Get valid QC flags
+      valid_qc <- if (!is.null(input$valid_qc_flags)) input$valid_qc_flags else NULL
+
+      # Reshape from long to wide
+      wide_data <- reshape_long_to_wide(
+        data = data,
+        datetime_col = datetime_col,
+        param_col = input$param_col,
+        value_col = input$value_col,
+        unit_col = if (input$unit_col != "") input$unit_col else NULL,
+        qc_col = if (input$qc_col != "") input$qc_col else NULL,
+        valid_qc_flags = valid_qc
+      )
+
+      # Store reshaped data
+      working_data(wide_data)
+
+      # Update column selectors with new wide-format columns
+      col_names <- names(wide_data)
+      col_choices <- setNames(col_names, col_names)
+      col_choices_optional <- c("(none)" = "", col_choices)
+
+      updateSelectInput(session, "datetime_col", choices = col_choices, selected = col_names[1])
+      updateSelectInput(session, "date_col", choices = col_choices, selected = col_names[1])
+      updateSelectInput(session, "speed_col", choices = col_choices_optional)
+      updateSelectInput(session, "dir_col", choices = col_choices_optional)
+      updateSelectInput(session, "gust_col", choices = col_choices_optional)
+      updateSelectInput(session, "temp_col", choices = col_choices_optional)
+
+      # Try to auto-detect columns in reshaped data
+      for (col_name in col_names) {
+        detected <- detect_units(col_name, wide_data[[col_name]])
+        if (detected$type == "speed") {
+          updateSelectInput(session, "speed_col", selected = col_name)
+        }
+        if (detected$type == "gust") {
+          updateSelectInput(session, "gust_col", selected = col_name)
+        }
+        if (detected$type == "direction") {
+          updateSelectInput(session, "dir_col", selected = col_name)
+        }
+        if (detected$type == "temp") {
+          updateSelectInput(session, "temp_col", selected = col_name)
+        }
+      }
+
+      showNotification(sprintf("Reshaped data: %d rows, %d columns", nrow(wide_data), ncol(wide_data)),
+                       type = "message")
+
+    }, error = function(e) {
+      showNotification(paste("Error reshaping data:", e$message), type = "error")
+    })
+  })
+
+  # Preview table - show working data if available, otherwise uploaded data
   output$preview_table <- renderDT({
-    req(uploaded_data())
-    datatable(head(uploaded_data(), 100),
+    # Prefer working_data if available (reshaped), otherwise show uploaded
+    data_to_show <- working_data()
+    if (is.null(data_to_show)) {
+      data_to_show <- uploaded_data()
+    }
+    req(data_to_show)
+
+    caption_text <- if (!is.null(working_data()) && input$is_long_format) {
+      "Reshaped data (wide format) - First 100 rows"
+    } else {
+      "First 100 rows of uploaded data"
+    }
+
+    datatable(head(data_to_show, 100),
               options = list(scrollX = TRUE, pageLength = 10),
-              caption = "First 100 rows of uploaded data")
+              caption = caption_text)
   })
 
   # Parse info
@@ -807,9 +1307,39 @@ server <- function(input, output, session) {
 
   # Process data
   observeEvent(input$process, {
-    req(uploaded_data())
+    # Use working_data if available (reshaped long format), otherwise uploaded_data
+    data <- working_data()
+    if (is.null(data)) {
+      data <- uploaded_data()
+    }
 
-    data <- uploaded_data()
+    # Validation: Check if data exists
+    if (is.null(data) || nrow(data) == 0) {
+      showNotification("No data loaded. Please upload a valid data file.", type = "error")
+      return()
+    }
+
+    # Validation: Check if we have at least speed OR gust data
+    has_speed <- !is.null(input$speed_col) && input$speed_col != "" && input$speed_col %in% names(data)
+    has_gust <- !is.null(input$gust_col) && input$gust_col != "" && input$gust_col %in% names(data)
+
+    if (!has_speed && !has_gust) {
+      showNotification("Warning: No wind speed or gust column selected. Please select at least one wind data column.",
+                       type = "error")
+      return()
+    }
+
+    # Validation: Check if selected columns exist in data
+    col_names <- names(data)
+    warnings_list <- c()
+
+    if (has_speed && !all(sapply(data[[input$speed_col]], function(x) is.na(x) || is.numeric(as.numeric(x))))) {
+      warnings_list <- c(warnings_list, "Wind speed column contains non-numeric values")
+    }
+
+    if (has_gust && !all(sapply(data[[input$gust_col]], function(x) is.na(x) || is.numeric(as.numeric(x))))) {
+      warnings_list <- c(warnings_list, "Wind gust column contains non-numeric values")
+    }
 
     tryCatch({
       # Parse datetime based on selected mode
@@ -833,67 +1363,126 @@ server <- function(input, output, session) {
       # Check if parsing was successful
       valid_dates <- sum(!is.na(data$parsed_datetime))
       if (valid_dates == 0) {
-        showNotification("Could not parse any dates. Please check the date/time format.", type = "error")
+        showNotification("Could not parse any dates. Please check the date/time column selection and format. This may not be the correct input file.",
+                         type = "error", duration = 10)
         return()
       }
 
       if (valid_dates < nrow(data)) {
-        showNotification(sprintf("Warning: %d of %d rows had unparseable dates",
-                                 nrow(data) - valid_dates, nrow(data)), type = "warning")
+        pct_failed <- round((nrow(data) - valid_dates) / nrow(data) * 100, 1)
+        showNotification(sprintf("Warning: %d of %d rows (%.1f%%) had unparseable dates",
+                                 nrow(data) - valid_dates, nrow(data), pct_failed),
+                         type = "warning", duration = 8)
       }
 
       # Filter out rows with invalid dates
       data <- data[!is.na(data$parsed_datetime), ]
 
+      # Additional validation after filtering
+      if (nrow(data) == 0) {
+        showNotification("No valid data rows remaining after date parsing. Please check if this is the correct file.",
+                         type = "error")
+        return()
+      }
+
+      # Adjust meteorological timestamps if convention is "end of hour"
+      # End-of-hour timestamps need to be shifted back by 1 hour so that
+      # the observation is associated with the correct hour window.
+      if (!is.null(input$met_timestamp_convention) && input$met_timestamp_convention == "end") {
+        data$parsed_datetime <- data$parsed_datetime - hours(1)
+      }
+
       # Perform hourly averaging
       result <- hourly_average(
         data = data,
         datetime_col = "parsed_datetime",
-        speed_col = input$speed_col,
+        speed_col = if (has_speed) input$speed_col else NULL,
         dir_col = input$dir_col,
-        temp_col = if (input$temp_col != "") input$temp_col else NULL,
+        temp_col = if (!is.null(input$temp_col) && input$temp_col != "") input$temp_col else NULL,
+        gust_col = if (has_gust) input$gust_col else NULL,
         speed_unit = input$speed_unit,
-        temp_unit = if (input$temp_col != "") input$temp_unit else NULL
+        gust_unit = if (has_gust && !is.null(input$gust_unit) && input$gust_unit != "") input$gust_unit else NULL,
+        temp_unit = if (!is.null(input$temp_col) && input$temp_col != "" && !is.null(input$temp_unit)) input$temp_unit else NULL
       )
+
+      # Check if result has any data columns beyond DateTime
+      if (ncol(result$hourly) <= 1) {
+        showNotification("Warning: No wind data columns in output. Please verify column selections.",
+                         type = "warning")
+      }
 
       processed_data(result)
 
-      showNotification(sprintf("Successfully processed %d hours of data", nrow(result)), type = "message")
+      # Build success message (inspect the hourly data frame)
+      hourly_result <- result$hourly
+      data_types <- c()
+      if ("Wind_Speed_mph" %in% names(hourly_result)) data_types <- c(data_types, "speed")
+      if ("Wind_Direction_deg" %in% names(hourly_result)) data_types <- c(data_types, "direction")
+      if ("Wind_Gust_mph" %in% names(hourly_result)) data_types <- c(data_types, "gust")
+      if ("Temperature_F" %in% names(hourly_result)) data_types <- c(data_types, "temperature")
+
+      showNotification(sprintf("Successfully processed %d hours of data (%s)",
+                               nrow(hourly_result), paste(data_types, collapse = ", ")),
+                       type = "message")
 
       # Switch to results tab
       updateTabsetPanel(session, "tabsetPanel", selected = "Processed Data")
 
     }, error = function(e) {
-      showNotification(paste("Error processing data:", e$message), type = "error")
+      showNotification(paste("Error processing data. Please check if this is the correct file format:", e$message),
+                       type = "error", duration = 10)
     })
   })
 
-  # Result table
+  # Result table (hourly)
   output$result_table <- renderDT({
     req(processed_data())
-    datatable(processed_data(),
+    datatable(processed_data()$hourly,
               options = list(scrollX = TRUE, pageLength = 25),
               caption = "Hourly averaged wind data")
+  })
+
+  # Sub-hourly result table
+  output$subhourly_table <- renderDT({
+    req(processed_data())
+    datatable(processed_data()$subhourly,
+              options = list(scrollX = TRUE, pageLength = 25),
+              caption = "Sub-hourly data (original resolution, standardized columns and units)")
   })
 
   # Summary statistics
   output$summary_stats <- renderPrint({
     req(processed_data())
-    data <- processed_data()
+    data <- processed_data()$hourly
 
     cat("Summary Statistics:\n")
     cat(sprintf("  Total hours: %d\n", nrow(data)))
     cat(sprintf("  Date range: %s to %s\n", min(data$DateTime), max(data$DateTime)))
-    cat("\nWind Speed (mph):\n")
-    cat(sprintf("  Min: %.2f\n", min(data$Wind_Speed_mph, na.rm = TRUE)))
-    cat(sprintf("  Max: %.2f\n", max(data$Wind_Speed_mph, na.rm = TRUE)))
-    cat(sprintf("  Mean: %.2f\n", mean(data$Wind_Speed_mph, na.rm = TRUE)))
-    cat("\nWind Direction (degrees):\n")
-    cat(sprintf("  Most common quadrant: %s\n",
-                c("N", "E", "S", "W")[which.max(table(cut(data$Wind_Direction_deg,
-                                                          breaks = c(0, 90, 180, 270, 360),
-                                                          labels = c("N", "E", "S", "W"),
-                                                          include.lowest = TRUE)))]))
+
+    if ("Wind_Speed_mph" %in% names(data) && sum(!is.na(data$Wind_Speed_mph)) > 0) {
+      cat("\nWind Speed (mph):\n")
+      cat(sprintf("  Min: %.2f\n", min(data$Wind_Speed_mph, na.rm = TRUE)))
+      cat(sprintf("  Max: %.2f\n", max(data$Wind_Speed_mph, na.rm = TRUE)))
+      cat(sprintf("  Mean: %.2f\n", mean(data$Wind_Speed_mph, na.rm = TRUE)))
+    }
+
+    if ("Wind_Direction_deg" %in% names(data) && sum(!is.na(data$Wind_Direction_deg)) > 0) {
+      cat("\nWind Direction (degrees):\n")
+      dir_table <- table(cut(data$Wind_Direction_deg,
+                             breaks = c(0, 90, 180, 270, 360),
+                             labels = c("N", "E", "S", "W"),
+                             include.lowest = TRUE))
+      if (length(dir_table) > 0) {
+        cat(sprintf("  Most common quadrant: %s\n", c("N", "E", "S", "W")[which.max(dir_table)]))
+      }
+    }
+
+    if ("Wind_Gust_mph" %in% names(data) && sum(!is.na(data$Wind_Gust_mph)) > 0) {
+      cat("\nWind Gust (mph):\n")
+      cat(sprintf("  Min: %.2f\n", min(data$Wind_Gust_mph, na.rm = TRUE)))
+      cat(sprintf("  Max: %.2f\n", max(data$Wind_Gust_mph, na.rm = TRUE)))
+      cat(sprintf("  Mean: %.2f\n", mean(data$Wind_Gust_mph, na.rm = TRUE)))
+    }
 
     if ("Temperature_F" %in% names(data) && sum(!is.na(data$Temperature_F)) > 0) {
       cat("\nTemperature (°F):\n")
@@ -903,18 +1492,21 @@ server <- function(input, output, session) {
     }
   })
 
-  # Download handler
+  # Download handler - hourly data
   output$download <- downloadHandler(
     filename = function() {
       paste0("wind_data_hourly_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
     },
     content = function(file) {
       req(processed_data())
-      write.csv(processed_data(), file, row.names = FALSE)
+      write.csv(processed_data()$hourly, file, row.names = FALSE)
     }
   )
+<<<<<<< HEAD
 # # # < claude/air-quality-data-comparison-39kax
 # ===
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
 
   # Download handler - sub-hourly data
   output$download_subhourly <- downloadHandler(
@@ -1010,13 +1602,23 @@ server <- function(input, output, session) {
     poll_data <- pollutant_raw()
     met_data <- processed_data()$hourly
 
+<<<<<<< HEAD
     met_dates <- as.POSIXct(met_data$DateTime, format = "%Y-%m-%d %H:%M", tz = "PST8")
+=======
+    met_dates <- as.POSIXct(met_data$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
     met_min <- min(met_dates, na.rm = TRUE)
     met_max <- max(met_dates, na.rm = TRUE)
 
     site_data <- poll_data[poll_data$SiteName == input$selected_site &
                             poll_data$parameter %in% input$selected_params, ]
+<<<<<<< HEAD
     site_data$parsed_date <- as.POSIXct(site_data$date_LT_shifted_to_selected_timezone, tz="PST8") # parse_datetime_string(as.character(site_data$date_LT_shifted_to_selected_timezone),adjust_dst = FALSE)
+=======
+    site_data$parsed_date <- parse_datetime_string(
+      as.character(site_data$date_LT_shifted_to_selected_timezone),
+      adjust_dst = FALSE)
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
 
     site_data <- site_data[!is.na(site_data$parsed_date) &
                             site_data$parsed_date >= met_min &
@@ -1044,6 +1646,7 @@ server <- function(input, output, session) {
     sel_params <- input$selected_params
     sel_dates  <- as.Date(input$selected_poll_dates)
 
+<<<<<<< HEAD
     date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "PST8")
     date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "PST8")
     all_hours <- seq(from = date_min, to = date_max, by = "hour")
@@ -1053,6 +1656,14 @@ server <- function(input, output, session) {
     sub$parsed_date <- as.POSIXct(sub$date_LT_shifted_to_selected_timezone, tz="PST8") # parse_datetime_string(as.character(sub$date_LT_shifted_to_selected_timezone),adjust_dst = FALSE)
     sub <- sub[!is.na(sub$parsed_date) &
                sub$parsed_date %in% all_hours, ]
+=======
+    sub <- poll_data[poll_data$parameter %in% sel_params, ]
+    sub$parsed_date <- parse_datetime_string(
+      as.character(sub$date_LT_shifted_to_selected_timezone),
+      adjust_dst = FALSE)
+    sub <- sub[!is.na(sub$parsed_date) &
+               as.Date(sub$parsed_date) %in% sel_dates, ]
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
     sub$sample_measurement <- as.numeric(sub$sample_measurement)
     sub <- sub[is.finite(sub$sample_measurement), ]
 
@@ -1071,6 +1682,7 @@ server <- function(input, output, session) {
       site_name <- input$selected_site
       sel_params <- input$selected_params
       sel_dates <- as.Date(input$selected_poll_dates)
+<<<<<<< HEAD
 	  
 	# Build complete hourly time grid: midnight on first selected day
       # through 11 PM on last selected day
@@ -1080,6 +1692,8 @@ server <- function(input, output, session) {
 
 	  browser("1594")
 
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       met_site <- if (!is.null(input$met_data_site) && input$met_data_site != "") {
         input$met_data_site
       } else {
@@ -1089,9 +1703,17 @@ server <- function(input, output, session) {
       # Filter pollutant data
       poll_sub <- poll_data[poll_data$SiteName == site_name &
                              poll_data$parameter %in% sel_params, ]
+<<<<<<< HEAD
       poll_sub$parsed_date <- as.POSIXct(poll_sub$date_LT_shifted_to_selected_timezone, tz="PST8") # parse_datetime_string(as.character(poll_sub$date_LT_shifted_to_selected_timezone),adjust_dst = FALSE)
       poll_sub <- poll_sub[!is.na(poll_sub$parsed_date) &
                             poll_sub$parsed_date %in% all_hours, ]
+=======
+      poll_sub$parsed_date <- parse_datetime_string(
+        as.character(poll_sub$date_LT_shifted_to_selected_timezone),
+        adjust_dst = FALSE)
+      poll_sub <- poll_sub[!is.na(poll_sub$parsed_date) &
+                            as.Date(poll_sub$parsed_date) %in% sel_dates, ]
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       if (nrow(poll_sub) == 0) {
         showNotification("No pollutant data after filtering.", type = "error")
         return()
@@ -1114,7 +1736,10 @@ server <- function(input, output, session) {
         sample_measurement = poll_sub$sample_measurement,
         stringsAsFactors = FALSE
       )
+<<<<<<< HEAD
 
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       reshape_df$date_hour <- floor_date(reshape_df$date, unit = "hour")
       wide_poll <- reshape_df %>%
         group_by(date_hour, parameter) %>%
@@ -1125,8 +1750,13 @@ server <- function(input, output, session) {
 
       # Build complete hourly time grid: midnight on first selected day
       # through 11 PM on last selected day
+<<<<<<< HEAD
       date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "PST8")
       date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "PST8")
+=======
+      date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "")
+      date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       all_hours <- seq(from = date_min, to = date_max, by = "hour")
       time_grid <- data.frame(date_hour = all_hours, stringsAsFactors = FALSE)
 
@@ -1146,7 +1776,11 @@ server <- function(input, output, session) {
 
       if (!is.null(met_subhourly) && nrow(met_subhourly) > 0) {
         sh <- met_subhourly
+<<<<<<< HEAD
         sh$date <- as.POSIXct(sh$DateTime, format = "%Y-%m-%d %H:%M", tz = "PST8")
+=======
+        sh$date <- as.POSIXct(sh$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
         sh <- sh[sh$date >= date_min & sh$date <= (date_max + 3600), ]
         if (nrow(sh) > 0) {
           wind_df <- data.frame(date = sh$date, stringsAsFactors = FALSE)
@@ -1161,7 +1795,11 @@ server <- function(input, output, session) {
       # Fall back to hourly if sub-hourly not available or empty
       if (is.null(wind_df) || nrow(wind_df) == 0) {
         hr <- met_hourly
+<<<<<<< HEAD
         hr$date <- as.POSIXct(hr$DateTime, format = "%Y-%m-%d %H:%M", tz = "PST8")
+=======
+        hr$date <- as.POSIXct(hr$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
         hr <- hr[hr$date >= date_min & hr$date <= (date_max + 3600), ]
         if (nrow(hr) > 0) {
           wind_df <- data.frame(date = hr$date, stringsAsFactors = FALSE)
@@ -1378,7 +2016,10 @@ server <- function(input, output, session) {
               options = list(scrollX = TRUE, pageLength = 25),
               caption = "Merged meteorological + pollutant data")
   })
+<<<<<<< HEAD
 # # # > local
+=======
+>>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
 }
 
 # Run the application
