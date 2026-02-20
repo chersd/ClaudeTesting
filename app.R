@@ -3,13 +3,14 @@
 # Performs hourly averaging with vector averaging for wind direction
 
 
-## Need timezone, pollutant sites and event dates selected
-
 library(shiny)
 library(dplyr)
+library(tidyr)
 library(lubridate)
 library(DT)
 library(readxl)
+library(shinyBS)
+library(base64enc)
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -90,7 +91,6 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
                             as.numeric(hour_vals),
                             as.numeric(minute_vals))
 
-    return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "Etc/GMT"))
     return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "PST8"))
   }
 
@@ -109,9 +109,7 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
 }
 
 #' Parse datetime strings in various formats
-
-parse_datetime_string <- function(datetime_str) {
-
+# Fixed: removed duplicate outer function definition that caused unclosed brace syntax error
 parse_datetime_string <- function(datetime_str, adjust_dst) {
 
   datetime_str <- trimws(datetime_str)
@@ -119,14 +117,10 @@ parse_datetime_string <- function(datetime_str, adjust_dst) {
   result <- rep(as.POSIXct(NA), n)
 
   # Detect and handle timezone abbreviations
-  # Daylight time zones need -1 hour adjustment to convert to standard time
   daylight_tz_pattern <- "-0.0{0,2}$|\\s+(PDT|EDT|CDT|MDT|ADT|AKDT|-0.0{0,2})$"
   standard_tz_pattern <- "-0.0{0,2}$|\\s+(PST|EST|CST|MST|AST|AKST|HST|UTC|GMT|-0.0{0,2})$"
 
-  # # Track which entries need daylight adjustment
-  # needs_dst_adjustment <- grepl(daylight_tz_pattern, datetime_str, ignore.case = TRUE)
-
-  # # Remove timezone abbreviations from strings before parsing
+  # Remove timezone abbreviations from strings before parsing
   datetime_str <- gsub(daylight_tz_pattern, "", datetime_str, ignore.case = TRUE)
   datetime_str <- gsub(standard_tz_pattern, "", datetime_str, ignore.case = TRUE)
   datetime_str <- trimws(datetime_str)
@@ -178,8 +172,6 @@ parse_datetime_string <- function(datetime_str, adjust_dst) {
          format = "posix")
   )
 
-browser("280")
-
   # First check for AM/PM format
   am_pm_idx <- grepl("(AM|PM|am|pm)", datetime_str, ignore.case = TRUE)
   if (any(am_pm_idx)) {
@@ -193,15 +185,12 @@ browser("280")
                        "%Y-%m-%d %I:%M %p", "%Y/%m/%d %I:%M %p")
     for (fmt in am_pm_formats) {
 
-      parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "Etc/GMT")
       parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "PST8")
       if (sum(!is.na(parsed)) > sum(!is.na(result[am_pm_idx]))) {
         result[am_pm_idx] <- parsed
       }
     }
   }
-browser("300")
-
   # Process non-AM/PM strings
   remaining_idx <- is.na(result)
   if (any(remaining_idx)) {
@@ -214,7 +203,6 @@ browser("300")
         if (any(numeric_idx)) {
           posix_vals <- as.numeric(remaining_str[numeric_idx])
 
-          parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "Etc/GMT")
           parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "PST8")
           temp_result <- result[remaining_idx]
           temp_result[numeric_idx] <- parsed_posix
@@ -230,7 +218,6 @@ browser("300")
             temp_str <- gsub("Z$", "", temp_str)
             # Remove timezone offset
             temp_str <- gsub("[+-]\\d{2}:\\d{2}$", "", temp_str)
-            parsed <- as.POSIXct(temp_str, format = fmt, tz = "Etc/GMT")
             parsed <- as.POSIXct(temp_str, format = fmt, tz = "PST8")
 
             temp_result <- result[remaining_idx]
@@ -243,16 +230,13 @@ browser("300")
         }
       }
     }
-	browser("340")
-
   }
 
   # Apply daylight saving adjustment: subtract 1 hour for daylight time zones
   # This converts daylight time to standard time
-  # Skipped when adjust_dst = FALSE (e.g. pollutant data already in local time)
-  if (adjust_dst && !is.na(result)) { # any(needs_dst_adjustment & !is.na(result))) {
-#    result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
-    result <- result - 3600  # subtract 1 hour (3600 seconds)
+  # Fixed: use any() for vector comparison instead of && with bare !is.na()
+  if (adjust_dst && any(!is.na(result))) {
+    result <- result - 3600
   }
 
   # Fix 2-digit years that weren't properly converted
@@ -405,11 +389,7 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
   # Ensure datetime is POSIXct
   data$datetime <- data[[datetime_col]]
   if (!inherits(data$datetime, "POSIXct")) {
-# # # < claude/air-quality-data-comparison-39kax
-    data$datetime <- as.POSIXct(data$datetime, tz = "Etc/GMT")
-# ===
     data$datetime <- as.POSIXct(data$datetime, tz = "PST8")
-# # # > local
   }
 
   # Create hour floor for grouping
@@ -450,7 +430,7 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
   # Round direction to nearest degree
   hourly_data$wind_dir_deg <- round(hourly_data$wind_dir_avg, 0)
 
-  # Prepare output (no POSIX timestamp, just formatted datetime)
+  # Prepare hourly-averaged output
   output <- data.frame(
     DateTime = format(hourly_data$hour_group, "%Y-%m-%d %H:%M"),
     Wind_Speed_mph = round(hourly_data$wind_speed_mph, 2),
@@ -462,7 +442,20 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
     output$Temperature_F <- round(hourly_data$temp_f, 1)
   }
 
-  return(output)
+  # Build sub-hourly (per-observation) output with converted units
+  # for downstream plotting at finer time resolution
+  subhourly <- data.frame(
+    DateTime = format(data$datetime, "%Y-%m-%d %H:%M"),
+    Wind_Speed_mph = round(convert_to_mph(data$wind_speed, speed_unit), 2),
+    Wind_Direction_deg = round(data$wind_dir, 0),
+    stringsAsFactors = FALSE
+  )
+  if (has_temp) {
+    subhourly$Temperature_F <- round(convert_to_fahrenheit(data$temperature, temp_unit), 1)
+  }
+
+  # Return list so pollutant section can access both resolutions
+  return(list(hourly = output, subhourly = subhourly))
 }
 
 # ============================================================================
@@ -483,8 +476,6 @@ ui <- fluidPage(
                            "application/vnd.ms-excel",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
 
-# # # < claude/air-quality-data-comparison-39kax
-# ===
       # Meteorological site name
       textInput("met_data_site", "Meteorological Site Name:",
                 placeholder = "e.g., KVNY, KLAX"),
@@ -530,7 +521,6 @@ ui <- fluidPage(
         )
       ),
 
-# # # > local
       hr(),
 
       # Date/Time configuration
@@ -858,7 +848,8 @@ server <- function(input, output, session) {
 
       processed_data(result)
 
-      showNotification(sprintf("Successfully processed %d hours of data", nrow(result)), type = "message")
+      # Fixed: result is now a list; use $hourly for row count
+      showNotification(sprintf("Successfully processed %d hours of data", nrow(result$hourly)), type = "message")
 
       # Switch to results tab
       updateTabsetPanel(session, "tabsetPanel", selected = "Processed Data")
@@ -871,7 +862,8 @@ server <- function(input, output, session) {
   # Result table
   output$result_table <- renderDT({
     req(processed_data())
-    datatable(processed_data(),
+    # Fixed: access $hourly since hourly_average returns a list
+    datatable(processed_data()$hourly,
               options = list(scrollX = TRUE, pageLength = 25),
               caption = "Hourly averaged wind data")
   })
@@ -879,7 +871,7 @@ server <- function(input, output, session) {
   # Summary statistics
   output$summary_stats <- renderPrint({
     req(processed_data())
-    data <- processed_data()
+    data <- processed_data()$hourly
 
     cat("Summary Statistics:\n")
     cat(sprintf("  Total hours: %d\n", nrow(data)))
@@ -910,11 +902,10 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(processed_data())
-      write.csv(processed_data(), file, row.names = FALSE)
+      # Fixed: access $hourly since hourly_average now returns a list
+      write.csv(processed_data()$hourly, file, row.names = FALSE)
     }
   )
-# # # < claude/air-quality-data-comparison-39kax
-# ===
 
   # Download handler - sub-hourly data
   output$download_subhourly <- downloadHandler(
@@ -1077,8 +1068,6 @@ server <- function(input, output, session) {
       date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "PST8")
       date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "PST8")
       all_hours <- seq(from = date_min, to = date_max, by = "hour")
-
-	  browser("1594")
 
       met_site <- if (!is.null(input$met_data_site) && input$met_data_site != "") {
         input$met_data_site
@@ -1378,7 +1367,6 @@ server <- function(input, output, session) {
               options = list(scrollX = TRUE, pageLength = 25),
               caption = "Merged meteorological + pollutant data")
   })
-# # # > local
 }
 
 # Run the application
