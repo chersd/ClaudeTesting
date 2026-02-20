@@ -194,13 +194,7 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
                             as.numeric(day_vals),
                             as.numeric(hour_vals),
                             as.numeric(minute_vals))
-<<<<<<< HEAD
-
     return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "Etc/GMT"))
-    return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = "PST8"))
-=======
-    return(as.POSIXct(datetime_str, format = "%Y-%m-%d %H:%M:%S", tz = ""))
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   }
 
   # Case 2: Single datetime column or date + time columns
@@ -218,30 +212,13 @@ parse_datetime_flexible <- function(data, date_col = NULL, time_col = NULL,
 }
 
 #' Parse datetime strings in various formats
-<<<<<<< HEAD
-
-parse_datetime_string <- function(datetime_str) {
-
-parse_datetime_string <- function(datetime_str, adjust_dst) {
-
-=======
-parse_datetime_string <- function(datetime_str, adjust_dst = TRUE) {
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+parse_datetime_string <- function(datetime_str, adjust_dst = FALSE) {
   datetime_str <- trimws(datetime_str)
   n <- length(datetime_str)
   result <- rep(as.POSIXct(NA), n)
 
   # Detect and handle timezone abbreviations
   # Daylight time zones need -1 hour adjustment to convert to standard time
-<<<<<<< HEAD
-  daylight_tz_pattern <- "-0.0{0,2}$|\\s+(PDT|EDT|CDT|MDT|ADT|AKDT|-0.0{0,2})$"
-  standard_tz_pattern <- "-0.0{0,2}$|\\s+(PST|EST|CST|MST|AST|AKST|HST|UTC|GMT|-0.0{0,2})$"
-
-  # # Track which entries need daylight adjustment
-  # needs_dst_adjustment <- grepl(daylight_tz_pattern, datetime_str, ignore.case = TRUE)
-
-  # # Remove timezone abbreviations from strings before parsing
-=======
   daylight_tz_pattern <- "\\s+(PDT|EDT|CDT|MDT|ADT|AKDT)$"
   standard_tz_pattern <- "\\s+(PST|EST|CST|MST|AST|AKST|HST|UTC|GMT)$"
 
@@ -249,7 +226,6 @@ parse_datetime_string <- function(datetime_str, adjust_dst = TRUE) {
   needs_dst_adjustment <- grepl(daylight_tz_pattern, datetime_str, ignore.case = TRUE)
 
   # Remove timezone abbreviations from strings before parsing
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   datetime_str <- gsub(daylight_tz_pattern, "", datetime_str, ignore.case = TRUE)
   datetime_str <- gsub(standard_tz_pattern, "", datetime_str, ignore.case = TRUE)
   datetime_str <- trimws(datetime_str)
@@ -301,8 +277,6 @@ parse_datetime_string <- function(datetime_str, adjust_dst = TRUE) {
          format = "posix")
   )
 
-browser("280")
-
   # First check for AM/PM format
   am_pm_idx <- grepl("(AM|PM|am|pm)", datetime_str, ignore.case = TRUE)
   if (any(am_pm_idx)) {
@@ -315,20 +289,12 @@ browser("280")
                        "%Y-%m-%d %I:%M:%S %p", "%Y/%m/%d %I:%M:%S %p",
                        "%Y-%m-%d %I:%M %p", "%Y/%m/%d %I:%M %p")
     for (fmt in am_pm_formats) {
-<<<<<<< HEAD
-
       parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "Etc/GMT")
-      parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "PST8")
-=======
-      parsed <- as.POSIXct(am_pm_strings, format = fmt, tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       if (sum(!is.na(parsed)) > sum(!is.na(result[am_pm_idx]))) {
         result[am_pm_idx] <- parsed
       }
     }
   }
-browser("300")
-
   # Process non-AM/PM strings
   remaining_idx <- is.na(result)
   if (any(remaining_idx)) {
@@ -340,13 +306,7 @@ browser("300")
         numeric_idx <- grepl("^\\d{9,10}$", remaining_str)
         if (any(numeric_idx)) {
           posix_vals <- as.numeric(remaining_str[numeric_idx])
-<<<<<<< HEAD
-
           parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "Etc/GMT")
-          parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "PST8")
-=======
-          parsed_posix <- as.POSIXct(posix_vals, origin = "1970-01-01", tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
           temp_result <- result[remaining_idx]
           temp_result[numeric_idx] <- parsed_posix
           result[remaining_idx] <- temp_result
@@ -361,12 +321,7 @@ browser("300")
             temp_str <- gsub("Z$", "", temp_str)
             # Remove timezone offset
             temp_str <- gsub("[+-]\\d{2}:\\d{2}$", "", temp_str)
-<<<<<<< HEAD
             parsed <- as.POSIXct(temp_str, format = fmt, tz = "Etc/GMT")
-            parsed <- as.POSIXct(temp_str, format = fmt, tz = "PST8")
-=======
-            parsed <- as.POSIXct(temp_str, format = fmt, tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
 
             temp_result <- result[remaining_idx]
             temp_still_na <- is.na(temp_result)
@@ -378,21 +333,13 @@ browser("300")
         }
       }
     }
-	browser("340")
-
   }
 
   # Apply daylight saving adjustment: subtract 1 hour for daylight time zones
   # This converts daylight time to standard time
   # Skipped when adjust_dst = FALSE (e.g. pollutant data already in local time)
-<<<<<<< HEAD
-  if (adjust_dst && !is.na(result)) { # any(needs_dst_adjustment & !is.na(result))) {
-#    result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
-    result <- result - 3600  # subtract 1 hour (3600 seconds)
-=======
-  if (adjust_dst && any(needs_dst_adjustment & !is.na(result))) {
-    result[needs_dst_adjustment] <- result[needs_dst_adjustment] - 3600  # subtract 1 hour (3600 seconds)
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+  if (adjust_dst && any(!is.na(result))) {
+    result[!is.na(result)] <- result[!is.na(result)] - 3600  # subtract 1 hour (3600 seconds)
   }
 
   # Fix 2-digit years that weren't properly converted
@@ -410,19 +357,11 @@ browser("300")
         new_year <- if (yr <= 50) 2000 + yr else 1900 + yr
         # Rebuild the datetime string with correct year
         new_dt_str <- format(result[i], paste0(new_year, "-%m-%d %H:%M:%S"))
-<<<<<<< HEAD
-        result[i] <- as.POSIXct(new_dt_str, format = "%Y-%m-%d %H:%M:%S", tz = "PST8")
-=======
-        result[i] <- as.POSIXct(new_dt_str, format = "%Y-%m-%d %H:%M:%S", tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+        result[i] <- as.POSIXct(new_dt_str, format = "%Y-%m-%d %H:%M:%S", tz = "Etc/GMT")
       }
     }
   }
 
-<<<<<<< HEAD
-
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   return(result)
 }
 
@@ -563,15 +502,7 @@ hourly_average <- function(data, datetime_col, speed_col, dir_col, temp_col = NU
   # Ensure datetime is POSIXct
   data$datetime <- data[[datetime_col]]
   if (!inherits(data$datetime, "POSIXct")) {
-<<<<<<< HEAD
-# # # < claude/air-quality-data-comparison-39kax
     data$datetime <- as.POSIXct(data$datetime, tz = "Etc/GMT")
-# ===
-    data$datetime <- as.POSIXct(data$datetime, tz = "PST8")
-# # # > local
-=======
-    data$datetime <- as.POSIXct(data$datetime, tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
   }
 
   # Create hour floor for grouping
@@ -732,11 +663,6 @@ ui <- fluidPage(
                            "application/vnd.ms-excel",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
 
-<<<<<<< HEAD
-# # # < claude/air-quality-data-comparison-39kax
-# ===
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       # Meteorological site name
       textInput("met_data_site", "Meteorological Site Name:",
                 placeholder = "e.g., KVNY, KLAX"),
@@ -754,19 +680,17 @@ ui <- fluidPage(
                 "Air quality agencies usually timestamp data at the START of the hour while meteorological data sources usually timestamp data at the END of the hour.",
                 placement = "right", trigger = "hover"),
 
-<<<<<<< HEAD
+      radioButtons("met_timeZone",
+                   tags$span("Meteorological data timestamps are in:",
+                             icon("info-circle", id = "met_TZ_info")),
+                   choices = list("Local Standard Time" = "LST",
+                                  "Local Daylight Savings Time" = "LDT"),
+                   selected = "LST",
+                   inline = TRUE),
+      bsTooltip("met_TZ_info",
+                "Cannot accept met data that are from a different timezone.",
+                placement = "right", trigger = "hover"),
 
-		radioButtons("met_timeZone",
-						   tags$span("Meteorological data timestamps are in:",
-									 icon("info-circle", id = "met_TZ_info")),
-						   choices = list("Local Standard Time" = "LST", "Local Daylight Savings Time" = "LDT"),
-						   selected = "LST",
-						   inline = TRUE),
-			  bsTooltip("met_TZ_info",
-						"Cannot accept met data that are from a different timezone.",
-						placement = "right", trigger = "hover"),
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       hr(),
 
       # Long format configuration
@@ -785,10 +709,6 @@ ui <- fluidPage(
         )
       ),
 
-<<<<<<< HEAD
-# # # > local
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       hr(),
 
       # Date/Time configuration
@@ -1502,11 +1422,6 @@ server <- function(input, output, session) {
       write.csv(processed_data()$hourly, file, row.names = FALSE)
     }
   )
-<<<<<<< HEAD
-# # # < claude/air-quality-data-comparison-39kax
-# ===
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
 
   # Download handler - sub-hourly data
   output$download_subhourly <- downloadHandler(
@@ -1602,23 +1517,13 @@ server <- function(input, output, session) {
     poll_data <- pollutant_raw()
     met_data <- processed_data()$hourly
 
-<<<<<<< HEAD
-    met_dates <- as.POSIXct(met_data$DateTime, format = "%Y-%m-%d %H:%M", tz = "PST8")
-=======
-    met_dates <- as.POSIXct(met_data$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+    met_dates <- as.POSIXct(met_data$DateTime, format = "%Y-%m-%d %H:%M", tz = "Etc/GMT")
     met_min <- min(met_dates, na.rm = TRUE)
     met_max <- max(met_dates, na.rm = TRUE)
 
     site_data <- poll_data[poll_data$SiteName == input$selected_site &
                             poll_data$parameter %in% input$selected_params, ]
-<<<<<<< HEAD
-    site_data$parsed_date <- as.POSIXct(site_data$date_LT_shifted_to_selected_timezone, tz="PST8") # parse_datetime_string(as.character(site_data$date_LT_shifted_to_selected_timezone),adjust_dst = FALSE)
-=======
-    site_data$parsed_date <- parse_datetime_string(
-      as.character(site_data$date_LT_shifted_to_selected_timezone),
-      adjust_dst = FALSE)
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+    site_data$parsed_date <- as.POSIXct(site_data$date_LT_shifted_to_selected_timezone, tz = "Etc/GMT")
 
     site_data <- site_data[!is.na(site_data$parsed_date) &
                             site_data$parsed_date >= met_min &
@@ -1646,24 +1551,10 @@ server <- function(input, output, session) {
     sel_params <- input$selected_params
     sel_dates  <- as.Date(input$selected_poll_dates)
 
-<<<<<<< HEAD
-    date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "PST8")
-    date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "PST8")
-    all_hours <- seq(from = date_min, to = date_max, by = "hour")
-
-
     sub <- poll_data[poll_data$parameter %in% sel_params, ]
-    sub$parsed_date <- as.POSIXct(sub$date_LT_shifted_to_selected_timezone, tz="PST8") # parse_datetime_string(as.character(sub$date_LT_shifted_to_selected_timezone),adjust_dst = FALSE)
-    sub <- sub[!is.na(sub$parsed_date) &
-               sub$parsed_date %in% all_hours, ]
-=======
-    sub <- poll_data[poll_data$parameter %in% sel_params, ]
-    sub$parsed_date <- parse_datetime_string(
-      as.character(sub$date_LT_shifted_to_selected_timezone),
-      adjust_dst = FALSE)
+    sub$parsed_date <- as.POSIXct(sub$date_LT_shifted_to_selected_timezone, tz = "Etc/GMT")
     sub <- sub[!is.na(sub$parsed_date) &
                as.Date(sub$parsed_date) %in% sel_dates, ]
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
     sub$sample_measurement <- as.numeric(sub$sample_measurement)
     sub <- sub[is.finite(sub$sample_measurement), ]
 
@@ -1682,18 +1573,6 @@ server <- function(input, output, session) {
       site_name <- input$selected_site
       sel_params <- input$selected_params
       sel_dates <- as.Date(input$selected_poll_dates)
-<<<<<<< HEAD
-	  
-	# Build complete hourly time grid: midnight on first selected day
-      # through 11 PM on last selected day
-      date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "PST8")
-      date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "PST8")
-      all_hours <- seq(from = date_min, to = date_max, by = "hour")
-
-	  browser("1594")
-
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       met_site <- if (!is.null(input$met_data_site) && input$met_data_site != "") {
         input$met_data_site
       } else {
@@ -1703,17 +1582,9 @@ server <- function(input, output, session) {
       # Filter pollutant data
       poll_sub <- poll_data[poll_data$SiteName == site_name &
                              poll_data$parameter %in% sel_params, ]
-<<<<<<< HEAD
-      poll_sub$parsed_date <- as.POSIXct(poll_sub$date_LT_shifted_to_selected_timezone, tz="PST8") # parse_datetime_string(as.character(poll_sub$date_LT_shifted_to_selected_timezone),adjust_dst = FALSE)
-      poll_sub <- poll_sub[!is.na(poll_sub$parsed_date) &
-                            poll_sub$parsed_date %in% all_hours, ]
-=======
-      poll_sub$parsed_date <- parse_datetime_string(
-        as.character(poll_sub$date_LT_shifted_to_selected_timezone),
-        adjust_dst = FALSE)
+      poll_sub$parsed_date <- as.POSIXct(poll_sub$date_LT_shifted_to_selected_timezone, tz = "Etc/GMT")
       poll_sub <- poll_sub[!is.na(poll_sub$parsed_date) &
                             as.Date(poll_sub$parsed_date) %in% sel_dates, ]
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       if (nrow(poll_sub) == 0) {
         showNotification("No pollutant data after filtering.", type = "error")
         return()
@@ -1736,10 +1607,6 @@ server <- function(input, output, session) {
         sample_measurement = poll_sub$sample_measurement,
         stringsAsFactors = FALSE
       )
-<<<<<<< HEAD
-
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
       reshape_df$date_hour <- floor_date(reshape_df$date, unit = "hour")
       wide_poll <- reshape_df %>%
         group_by(date_hour, parameter) %>%
@@ -1750,13 +1617,8 @@ server <- function(input, output, session) {
 
       # Build complete hourly time grid: midnight on first selected day
       # through 11 PM on last selected day
-<<<<<<< HEAD
-      date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "PST8")
-      date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "PST8")
-=======
-      date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "")
-      date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+      date_min <- as.POSIXct(paste0(min(sel_dates), " 00:00"), tz = "Etc/GMT")
+      date_max <- as.POSIXct(paste0(max(sel_dates), " 23:00"), tz = "Etc/GMT")
       all_hours <- seq(from = date_min, to = date_max, by = "hour")
       time_grid <- data.frame(date_hour = all_hours, stringsAsFactors = FALSE)
 
@@ -1776,11 +1638,7 @@ server <- function(input, output, session) {
 
       if (!is.null(met_subhourly) && nrow(met_subhourly) > 0) {
         sh <- met_subhourly
-<<<<<<< HEAD
-        sh$date <- as.POSIXct(sh$DateTime, format = "%Y-%m-%d %H:%M", tz = "PST8")
-=======
-        sh$date <- as.POSIXct(sh$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+        sh$date <- as.POSIXct(sh$DateTime, format = "%Y-%m-%d %H:%M", tz = "Etc/GMT")
         sh <- sh[sh$date >= date_min & sh$date <= (date_max + 3600), ]
         if (nrow(sh) > 0) {
           wind_df <- data.frame(date = sh$date, stringsAsFactors = FALSE)
@@ -1795,11 +1653,7 @@ server <- function(input, output, session) {
       # Fall back to hourly if sub-hourly not available or empty
       if (is.null(wind_df) || nrow(wind_df) == 0) {
         hr <- met_hourly
-<<<<<<< HEAD
-        hr$date <- as.POSIXct(hr$DateTime, format = "%Y-%m-%d %H:%M", tz = "PST8")
-=======
-        hr$date <- as.POSIXct(hr$DateTime, format = "%Y-%m-%d %H:%M", tz = "")
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
+        hr$date <- as.POSIXct(hr$DateTime, format = "%Y-%m-%d %H:%M", tz = "Etc/GMT")
         hr <- hr[hr$date >= date_min & hr$date <= (date_max + 3600), ]
         if (nrow(hr) > 0) {
           wind_df <- data.frame(date = hr$date, stringsAsFactors = FALSE)
@@ -2016,10 +1870,6 @@ server <- function(input, output, session) {
               options = list(scrollX = TRUE, pageLength = 25),
               caption = "Merged meteorological + pollutant data")
   })
-<<<<<<< HEAD
-# # # > local
-=======
->>>>>>> 500ebd4dcb624eee403bbce2202b34719bf39aa8
 }
 
 # Run the application
